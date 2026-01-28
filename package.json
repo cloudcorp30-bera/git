@@ -1,21 +1,61 @@
 {
-  "name": "bera-youtube-api",
+  "name": "bera-youtube-mp3-downloader",
   "version": "1.0.0",
+  "description": "YouTube MP3 Downloader API with Web Interface - Downloads real audio files (MB size)",
+  "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "install-deps": "npm install && curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o yt-dlp && chmod +x yt-dlp"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "setup": "npm install && pip install yt-dlp",
+    "install-tools": "pip install yt-dlp || npm install -g yt-dlp || echo 'Please install yt-dlp manually: https://github.com/yt-dlp/yt-dlp'",
+    "clean": "rm -rf downloads/* && rm -rf node_modules package-lock.json"
   },
+  "keywords": [
+    "youtube",
+    "mp3",
+    "downloader",
+    "api",
+    "audio",
+    "converter",
+    "bera"
+  ],
+  "author": "Bera",
+  "license": "MIT",
   "dependencies": {
-    "express": "^5.0.1",
-    "express-rate-limit": "^8.2.1",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.1.5",
     "helmet": "^7.1.0",
-    "cors": "^2.8.5",
-    "fluent-ffmpeg": "^2.1.3",
-    "play-dl": "^1.9.7"
+    "cors": "^2.8.5"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
-  }
+  },
+  "engines": {
+    "node": ">=16.0.0",
+    "npm": ">=8.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/bera-youtube-mp3-downloader.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/bera-youtube-mp3-downloader/issues"
+  },
+  "homepage": "https://github.com/yourusername/bera-youtube-mp3-downloader#readme",
+  "optionalDependencies": {
+    "yt-dlp-exec": "^2.0.3"
+  },
+  "files": [
+    "server.js",
+    "package.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": [
+    "linux",
+    "darwin",
+    "win32"
+  ]
 }
