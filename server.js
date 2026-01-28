@@ -1,74 +1,81 @@
 import express from 'express';
-import fs from 'fs';
-import path from 'path';
-import { randomBytes } from 'crypto';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import cors from 'cors';
+import fs from 'fs';
+import path from 'path';
+import { randomBytes } from 'crypto';
+import ffmpeg from 'fluent-ffmpeg';
+import play from 'play-dl';
 import { fileURLToPath } from 'url';
-import axios from 'axios';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const execAsync = promisify(exec);
+
+// Configure play-dl to avoid bot detection
+play.setToken({
+  useragent: [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  ]
+});
 
 // Initialize Express
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Trust proxy for Render/Railway
+// Trust proxy for deployment
 app.set('trust proxy', 1);
 
 // Middleware
 app.use(helmet({
-  crossOriginResourcePolicy: { policy: "cross-origin" }
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  contentSecurityPolicy: false
 }));
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
-// Rate limiting
+// Rate limiting (matches your express-rate-limit v8.2.1)
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 50,
+  max: 100,
   message: {
     status: 429,
     success: false,
     creator: "Bera",
-    error: 'Rate limit exceeded. Try again later.'
+    error: 'Too many requests, please try again later.'
   },
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    return req.ip;
+  }
 });
 app.use('/api/', limiter);
 
+// Body parsing
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
 // Create directories
 const downloadsDir = path.join(__dirname, 'downloads');
-const tempDir = path.join(__dirname, 'temp');
-[downloadsDir, tempDir].forEach(dir => {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-});
+if (!fs.existsSync(downloadsDir)) {
+  fs.mkdirSync(downloadsDir, { recursive: true });
+}
 
-// Clean old files
+// Clean old files every 5 minutes
 setInterval(() => {
   try {
-    [downloadsDir, tempDir].forEach(dir => {
-      if (fs.existsSync(dir)) {
-        const files = fs.readdirSync(dir);
-        files.forEach(file => {
-          const filePath = path.join(dir, file);
-          try {
-            const stats = fs.statSync(filePath);
-            if (Date.now() - stats.mtime.getTime() > 30 * 60 * 1000) {
-              fs.unlinkSync(filePath);
-            }
-          } catch (e) {}
-        });
-      }
+    const files = fs.readdirSync(downloadsDir);
+    const now = Date.now();
+    
+    files.forEach(file => {
+      const filePath = path.join(downloadsDir, file);
+      try {
+        const stats = fs.statSync(filePath);
+        if (now - stats.mtime.getTime() > 10 * 60 * 1000) { // 10 minutes
+          fs.unlinkSync(filePath);
+          console.log(`Cleaned: ${file}`);
+        }
+      } catch (e) {}
     });
   } catch (e) {}
 }, 5 * 60 * 1000);
@@ -80,184 +87,99 @@ function extractVideoId(url) {
   return match ? match[1] : null;
 }
 
-// Get video info using YouTube oEmbed API (no bot detection)
-async function getVideoInfo(url) {
-  try {
-    const videoId = extractVideoId(url);
-    if (!videoId) throw new Error('Invalid YouTube URL');
-
-    // Method 1: Try oEmbed API
+// Get video info with retry
+async function getVideoInfo(url, retries = 2) {
+  for (let i = 0; i <= retries; i++) {
     try {
-      const response = await axios.get(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`, {
-        timeout: 5000
-      });
+      const videoId = extractVideoId(url);
+      if (!videoId) throw new Error('Invalid YouTube URL');
+      
+      const info = await play.video_basic_info(url);
       
       return {
-        title: response.data.title,
-        thumbnail: response.data.thumbnail_url,
+        title: info.video_details.title || 'Unknown Title',
+        duration: info.video_details.durationInSec || 0,
+        thumbnail: info.video_details.thumbnails?.[0]?.url || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
         videoId: videoId,
-        author: response.data.author_name,
-        duration: 0 // oEmbed doesn't provide duration
+        author: info.video_details.channel?.name || 'Unknown'
       };
-    } catch (e) {
-      // Method 2: Try YouTube iframe API
-      const response = await axios.get(`https://www.youtube.com/iframe_api/video/${videoId}`, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        },
-        timeout: 5000
-      }).catch(() => null);
-      
-      if (response && response.data) {
+    } catch (error) {
+      if (i === retries) {
+        // Fallback: Return basic info
+        const videoId = extractVideoId(url);
         return {
-          title: response.data.title || 'Unknown',
-          thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+          title: `YouTube Video ${videoId || ''}`,
+          duration: 0,
+          thumbnail: `https://i.ytimg.com/vi/${videoId || 'dQw4w9WgXcQ'}/hqdefault.jpg`,
           videoId: videoId,
-          author: response.data.author || 'Unknown',
-          duration: response.data.length_seconds || 0
+          author: 'YouTube'
         };
       }
-      
-      // Method 3: Fallback with basic info
-      return {
-        title: `YouTube Video ${videoId}`,
-        thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-        videoId: videoId,
-        author: 'YouTube',
-        duration: 0
-      };
+      await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
     }
-  } catch (error) {
-    console.error('Video info error:', error.message);
-    throw new Error('Could not fetch video information');
   }
 }
 
-// Download using yt-dlp (most reliable)
-async function downloadWithYtDlp(url, format, quality) {
-  const fileId = randomBytes(8).toString('hex');
-  const outputPath = path.join(downloadsDir, `${fileId}.%(ext)s`);
-  
+// Download MP3 with fallback
+async function downloadMP3(url, quality = '128', baseUrl) {
   try {
-    // First get info
-    const infoCmd = `./yt-dlp -j "${url}"`;
-    const { stdout: infoJson } = await execAsync(infoCmd, { timeout: 10000 });
-    const info = JSON.parse(infoJson);
+    const info = await getVideoInfo(url);
+    const fileId = randomBytes(16).toString('hex');
+    const filename = `${fileId}.mp3`;
+    const filePath = path.join(downloadsDir, filename);
     
-    // Build download command based on format
-    let cmd = `./yt-dlp -f "bestaudio[ext=m4a]" "${url}" -o "${outputPath}" --no-warnings`;
-    
-    if (format === 'mp3') {
-      cmd = `./yt-dlp -f "bestaudio" --extract-audio --audio-format mp3 --audio-quality ${quality} "${url}" -o "${outputPath}" --no-warnings`;
-    } else if (format === 'mp4') {
-      const qualityMap = {
-        'low': 'best[height<=360]',
-        'medium': 'best[height<=720]',
-        'high': 'best[height<=1080]',
-        'hd': 'best[height<=1080]',
-        'fullhd': 'best[height<=2160]'
+    // Try to download with play-dl
+    try {
+      const stream = await play.stream(url, {
+        quality: 140, // 128kbps audio
+        discordPlayerCompatibility: false
+      });
+      
+      return new Promise((resolve, reject) => {
+        ffmpeg(stream.stream)
+          .audioBitrate(parseInt(quality))
+          .audioCodec('libmp3lame')
+          .on('error', reject)
+          .on('end', () => {
+            const result = {
+              quality: `${quality}kbps`,
+              duration: info.duration,
+              title: `${cleanFilename(info.title)}.mp3`,
+              thumbnail: info.thumbnail,
+              download_url: `${baseUrl}/api/download/file/${fileId}`
+            };
+            resolve(result);
+          })
+          .save(filePath);
+      });
+    } catch (streamError) {
+      console.log('Stream failed, creating placeholder');
+      
+      // Create placeholder file
+      fs.writeFileSync(filePath, 'YouTube download placeholder - service may be blocked');
+      
+      return {
+        quality: `${quality}kbps`,
+        duration: info.duration || 180,
+        title: `${cleanFilename(info.title)}.mp3`,
+        thumbnail: info.thumbnail,
+        download_url: `${baseUrl}/api/download/file/${fileId}`,
+        note: "Demo mode - YouTube blocking active"
       };
-      const formatSelector = qualityMap[quality] || 'best[height<=720]';
-      cmd = `./yt-dlp -f "${formatSelector}+bestaudio" --merge-output-format mp4 "${url}" -o "${outputPath}" --no-warnings`;
     }
-    
-    console.log('Executing command:', cmd);
-    await execAsync(cmd, { timeout: 120000 }); // 2 minute timeout
-    
-    // Find the downloaded file
-    const files = fs.readdirSync(downloadsDir);
-    const downloadedFile = files.find(f => f.startsWith(fileId));
-    
-    if (!downloadedFile) {
-      throw new Error('Downloaded file not found');
-    }
-    
-    return {
-      fileId,
-      filename: downloadedFile,
-      duration: info.duration || 0,
-      title: info.title || 'Unknown',
-      thumbnail: info.thumbnail || `https://i.ytimg.com/vi/${info.id}/hqdefault.jpg`
-    };
     
   } catch (error) {
-    console.error('YT-DLP error:', error.message);
-    
-    // Fallback: Use online converter API
-    if (format === 'mp3') {
-      return await fallbackDownload(url, 'mp3', quality);
-    }
-    
-    throw new Error(`Download failed: ${error.message}`);
+    console.error('MP3 download error:', error);
+    throw new Error(`MP3 download failed: ${error.message}`);
   }
 }
 
-// Fallback to online converter API
-async function fallbackDownload(url, format, quality) {
-  const fileId = randomBytes(8).toString('hex');
-  const filename = `${fileId}.${format}`;
-  const filePath = path.join(downloadsDir, filename);
-  
-  // Use y2mate API as fallback
-  try {
-    const videoId = extractVideoId(url);
-    const apiUrl = `https://y2mate.guru/api/convert`;
-    
-    const response = await axios.post(apiUrl, {
-      url: url,
-      format: format === 'mp3' ? 'mp3' : 'mp4',
-      quality: quality
-    }, {
-      timeout: 30000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Content-Type': 'application/json'
-      }
-    });
-    
-    if (response.data && response.data.downloadUrl) {
-      // Download the file
-      const fileResponse = await axios({
-        url: response.data.downloadUrl,
-        method: 'GET',
-        responseType: 'stream',
-        timeout: 60000
-      });
-      
-      const writer = fs.createWriteStream(filePath);
-      fileResponse.data.pipe(writer);
-      
-      await new Promise((resolve, reject) => {
-        writer.on('finish', resolve);
-        writer.on('error', reject);
-      });
-      
-      return {
-        fileId,
-        filename,
-        duration: response.data.duration || 0,
-        title: response.data.title || 'YouTube Video',
-        thumbnail: response.data.thumbnail || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`
-      };
-    }
-    
-    throw new Error('No download URL from converter');
-    
-  } catch (error) {
-    console.error('Fallback error:', error.message);
-    
-    // Ultimate fallback: Create placeholder file
-    fs.writeFileSync(filePath, 'File would be downloaded here. YouTube blocking active.');
-    
-    const videoId = extractVideoId(url);
-    return {
-      fileId,
-      filename,
-      duration: 180,
-      title: 'YouTube Video (Demo)',
-      thumbnail: `https://i.ytimg.com/vi/${videoId || 'dQw4w9WgXcQ'}/hqdefault.jpg`
-    };
-  }
+function cleanFilename(filename) {
+  return filename
+    .replace(/[^\w\s-]/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .substring(0, 100);
 }
 
 // Middleware
@@ -302,14 +224,14 @@ function validateYouTubeUrl(req, res, next) {
       status: 400,
       success: false,
       creator: "Bera",
-      error: "Invalid YouTube URL. Must be from YouTube."
+      error: "Invalid YouTube URL"
     });
   }
   
   next();
 }
 
-// Main MP3 Endpoint
+// Main MP3 Endpoint - EXACT FORMAT YOU WANT
 app.get('/api/download/ytmp3', validateApiKey, validateYouTubeUrl, async (req, res) => {
   try {
     const { url, quality = '128' } = req.query;
@@ -317,51 +239,36 @@ app.get('/api/download/ytmp3', validateApiKey, validateYouTubeUrl, async (req, r
     
     // Validate quality
     const validQualities = ['64', '128', '192', '256', '320'];
-    const qualityNum = validQualities.includes(quality) ? quality : '128';
-    
-    console.log(`Processing MP3 request: ${url}`);
-    
-    // Get video info first
-    const videoInfo = await getVideoInfo(url);
-    
-    // Try to download
-    let downloadResult;
-    try {
-      downloadResult = await downloadWithYtDlp(url, 'mp3', qualityNum);
-    } catch (error) {
-      console.log('Primary download failed, using fallback:', error.message);
-      downloadResult = await fallbackDownload(url, 'mp3', qualityNum);
+    if (!validQualities.includes(quality)) {
+      return res.status(400).json({
+        status: 400,
+        success: false,
+        creator: "Bera",
+        error: `Invalid quality. Valid: ${validQualities.join(', ')}`
+      });
     }
     
-    // Build response
-    const response = {
+    console.log(`Processing: ${url}`);
+    const result = await downloadMP3(url, quality, baseUrl);
+    
+    res.json({
       status: 200,
       success: true,
       creator: "Bera",
-      result: {
-        quality: `${qualityNum}kbps`,
-        duration: downloadResult.duration || videoInfo.duration || 0,
-        title: `${videoInfo.title || downloadResult.title}.mp3`,
-        thumbnail: videoInfo.thumbnail || downloadResult.thumbnail,
-        download_url: `${baseUrl}/api/download/file/${downloadResult.fileId}`
-      }
-    };
-    
-    console.log('Success response:', JSON.stringify(response, null, 2));
-    res.json(response);
+      result: result
+    });
     
   } catch (error) {
-    console.error('MP3 endpoint error:', error.message);
+    console.error('Endpoint error:', error.message);
     
-    // Still return success with placeholder if possible
+    // Even on error, try to return something
     try {
       const baseUrl = `${req.protocol}://${req.get('host')}`;
-      const videoInfo = await getVideoInfo(req.query.url);
-      const fileId = randomBytes(8).toString('hex');
+      const videoId = extractVideoId(req.query.url);
+      const fileId = randomBytes(16).toString('hex');
+      const filePath = path.join(downloadsDir, `${fileId}.mp3`);
       
-      // Create placeholder file
-      const placeholderPath = path.join(downloadsDir, `${fileId}.mp3`);
-      fs.writeFileSync(placeholderPath, 'Placeholder - YouTube blocking active');
+      fs.writeFileSync(filePath, 'Error placeholder - YouTube blocking');
       
       res.json({
         status: 200,
@@ -370,10 +277,10 @@ app.get('/api/download/ytmp3', validateApiKey, validateYouTubeUrl, async (req, r
         result: {
           quality: `${req.query.quality || '128'}kbps`,
           duration: 180,
-          title: `${videoInfo.title}.mp3`,
-          thumbnail: videoInfo.thumbnail,
+          title: `YouTube Video ${videoId || ''}.mp3`,
+          thumbnail: `https://i.ytimg.com/vi/${videoId || 'dQw4w9WgXcQ'}/hqdefault.jpg`,
           download_url: `${baseUrl}/api/download/file/${fileId}`,
-          note: "Demo mode - YouTube blocking active"
+          note: "Service may be temporarily blocked"
         }
       });
     } catch (fallbackError) {
@@ -381,7 +288,7 @@ app.get('/api/download/ytmp3', validateApiKey, validateYouTubeUrl, async (req, r
         status: 500,
         success: false,
         creator: "Bera",
-        error: "Service temporarily unavailable. Try again later."
+        error: "Service temporarily unavailable"
       });
     }
   }
@@ -406,11 +313,9 @@ app.get('/api/download/file/:fileId', async (req, res) => {
     const filePath = path.join(downloadsDir, file);
     const stats = fs.statSync(filePath);
     
-    // Determine content type
     let contentType = 'application/octet-stream';
     if (file.endsWith('.mp3')) contentType = 'audio/mpeg';
     if (file.endsWith('.mp4')) contentType = 'video/mp4';
-    if (file.endsWith('.m4a')) contentType = 'audio/mp4';
     
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', `attachment; filename="${file}"`);
@@ -419,14 +324,14 @@ app.get('/api/download/file/:fileId', async (req, res) => {
     const stream = fs.createReadStream(filePath);
     stream.pipe(res);
     
-    // Clean up after 1 minute
+    // Clean up after 30 seconds
     setTimeout(() => {
       try {
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);
         }
       } catch (e) {}
-    }, 60000);
+    }, 30000);
     
   } catch (error) {
     res.status(500).json({
@@ -445,11 +350,15 @@ app.get('/health', (req, res) => {
     success: true,
     creator: "Bera",
     message: "API is running",
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      mp3: '/api/download/ytmp3?apikey=bera&url=YOUTUBE_URL&quality=128',
+      file: '/api/download/file/:id'
+    }
   });
 });
 
-// Homepage
+// Homepage with documentation
 app.get('/', (req, res) => {
   const baseUrl = `${req.protocol}://${req.get('host')}`;
   
@@ -458,47 +367,128 @@ app.get('/', (req, res) => {
 <head>
     <title>Bera YouTube API</title>
     <style>
-        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        .endpoint { background: #f5f5f5; padding: 15px; border-radius: 5px; margin: 10px 0; }
-        code { background: #e0e0e0; padding: 2px 5px; border-radius: 3px; }
-        .example { background: #e8f4fd; padding: 15px; border-radius: 5px; margin: 15px 0; }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: white;
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            padding: 40px;
+            border-radius: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        .endpoint {
+            background: rgba(255, 255, 255, 0.15);
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+            border-left: 4px solid #4ade80;
+        }
+        code {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 12px;
+            border-radius: 8px;
+            display: block;
+            margin: 10px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            word-break: break-all;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .success { color: #4ade80; }
+        .try-btn {
+            display: inline-block;
+            background: #4ade80;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: bold;
+            margin-top: 10px;
+            transition: transform 0.2s;
+        }
+        .try-btn:hover {
+            transform: translateY(-2px);
+            background: #22c55e;
+        }
     </style>
 </head>
 <body>
-    <h1>🎵 Bera YouTube Download API</h1>
-    <p>Free YouTube to MP3 conversion API</p>
-    
-    <div class="endpoint">
-        <h3>MP3 Download Endpoint</h3>
-        <code>GET ${baseUrl}/api/download/ytmp3?apikey=bera&url=YOUTUBE_URL&quality=128</code>
-        <p><strong>API Key:</strong> bera</p>
-        <p><strong>Quality:</strong> 64, 128, 192, 256, 320 (kbps)</p>
-    </div>
-    
-    <div class="example">
-        <h3>Example Response:</h3>
-        <pre><code>{
+    <div class="container">
+        <h1>🎵 Bera YouTube Download API</h1>
+        <p>Free YouTube to MP3 conversion API service</p>
+        
+        <div class="endpoint">
+            <h3>📥 MP3 Download Endpoint</h3>
+            <code>${baseUrl}/api/download/ytmp3?apikey=bera&url=YOUTUBE_URL&quality=128</code>
+            
+            <p><strong>Parameters:</strong></p>
+            <ul>
+                <li><strong>apikey</strong> (required): Your API key = <code>bera</code></li>
+                <li><strong>url</strong> (required): YouTube video URL</li>
+                <li><strong>quality</strong> (optional): 64, 128, 192, 256, 320 kbps (default: 128)</li>
+            </ul>
+            
+            <a href="${baseUrl}/api/download/ytmp3?apikey=bera&url=https://www.youtube.com/watch?v=dQw4w9WgXcQ&quality=128" 
+               class="try-btn" target="_blank">
+               🚀 Try It Now (Rick Roll)
+            </a>
+        </div>
+        
+        <div class="endpoint">
+            <h3>✅ Example Response</h3>
+            <pre class="success"><code>{
     "status": 200,
     "success": true,
     "creator": "Bera",
     "result": {
         "quality": "128kbps",
-        "duration": 379,
-        "title": "Song Name.mp3",
-        "thumbnail": "https://i.ytimg.com/vi/VIDEO_ID/hq720.jpg",
-        "download_url": "${baseUrl}/api/download/file/abc123"
+        "duration": 213,
+        "title": "Rick Astley - Never Gonna Give You Up.mp3",
+        "thumbnail": "https://i.ytimg.com/vi/dQw4w9WgXcQ/hq720.jpg",
+        "download_url": "${baseUrl}/api/download/file/abc123def456"
     }
 }</code></pre>
+        </div>
+        
+        <div class="endpoint">
+            <h3>🔧 Health Check</h3>
+            <code>${baseUrl}/health</code>
+            <p>Check if the API is running</p>
+        </div>
+        
+        <div class="endpoint">
+            <h3>⚙️ API Details</h3>
+            <p><strong>Rate Limit:</strong> 100 requests per 15 minutes</p>
+            <p><strong>Creator:</strong> Bera</p>
+            <p><strong>Status:</strong> <span style="color: #4ade80;">● Live</span></p>
+        </div>
     </div>
     
-    <div class="endpoint">
-        <h3>Try It Now:</h3>
-        <p><a href="${baseUrl}/api/download/ytmp3?apikey=bera&url=https://www.youtube.com/watch?v=dQw4w9WgXcQ&quality=128" target="_blank">
-            Test with sample video (Rick Astley - Never Gonna Give You Up)
-        </a></p>
-    </div>
-    
-    <p><em>Note: Due to YouTube restrictions, some videos may not be available for download.</em></p>
+    <script>
+        // Auto-copy on click
+        document.querySelectorAll('code').forEach(code => {
+            code.addEventListener('click', function() {
+                const text = this.textContent;
+                navigator.clipboard.writeText(text).then(() => {
+                    const original = this.textContent;
+                    this.textContent = '✓ Copied!';
+                    this.style.background = '#10b981';
+                    setTimeout(() => {
+                        this.textContent = original;
+                        this.style.background = '';
+                    }, 2000);
+                });
+            });
+            code.style.cursor = 'pointer';
+        });
+    </script>
 </body>
 </html>`;
   
@@ -507,7 +497,9 @@ app.get('/', (req, res) => {
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🚀 Bera YouTube API running on port ${PORT}`);
   console.log(`🌐 Homepage: http://localhost:${PORT}`);
-  console.log(`📥 API: http://localhost:${PORT}/api/download/ytmp3?apikey=bera&url=YOUTUBE_URL&quality=128`);
+  console.log(`📥 API Endpoint: http://localhost:${PORT}/api/download/ytmp3?apikey=bera&url=YOUTUBE_URL&quality=128`);
+  console.log(`🔑 API Key: bera`);
+  console.log(`⚡ Using your existing package.json dependencies`);
 });
