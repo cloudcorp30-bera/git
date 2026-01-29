@@ -11,7 +11,6 @@ import { promisify } from 'util';
 import stream from 'stream';
 import os from 'os';
 import axios from 'axios';
-import WebSocket from 'ws';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,9 +18,6 @@ const execAsync = promisify(exec);
 
 const app = express();
 const PORT = process.env.PORT || 10000;
-
-// WebSocket server for real-time updates
-const wss = new WebSocket.Server({ noServer: true });
 
 // Middleware
 app.use(helmet({
@@ -78,7 +74,7 @@ setInterval(() => {
   } catch (e) {}
 }, 10 * 60 * 1000);
 
-// ========== YOUTUBE DOWNLOADER API ==========
+// ========== HELPER FUNCTIONS ==========
 
 // Extract video ID from YouTube URL
 function extractVideoId(url) {
@@ -291,19 +287,22 @@ app.get('/api/download/youtube-mp4', async (req, res) => {
         format: 'mp4',
         download_url: `${baseUrl}/api/download/file/${fileId}.mp4`,
         direct_stream: `${baseUrl}/api/stream/video/${fileId}`,
-        file_ready: false, // Will be ready when download completes
+        file_ready: false,
         download_id: fileId
       }
     });
     
-    // Start MP4 download
+    // Start MP4 download in background
     setTimeout(async () => {
       try {
+        console.log(`🔄 Downloading YouTube video ${videoId} as MP4...`);
         const result = await downloadYouTubeVideo(videoId, quality, 'mp4');
         
         // Rename file with proper extension
         const newPath = path.join(downloadsDir, `${fileId}.mp4`);
-        fs.renameSync(result.filePath, newPath);
+        if (fs.existsSync(result.filePath)) {
+          fs.renameSync(result.filePath, newPath);
+        }
         
         console.log(`✅ MP4 download complete: ${newPath}`);
       } catch (error) {
@@ -312,7 +311,12 @@ app.get('/api/download/youtube-mp4', async (req, res) => {
     }, 100);
     
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({
+      status: 500,
+      success: false,
+      creator: "Bera",
+      error: error.message
+    });
   }
 });
 
@@ -419,7 +423,12 @@ app.post('/api/scrape/start', async (req, res) => {
     });
     
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({
+      status: 500,
+      success: false,
+      creator: "Bera",
+      error: error.message
+    });
   }
 });
 
@@ -430,14 +439,24 @@ app.get('/api/scrape/status/:jobId', (req, res) => {
     const jobDir = path.join(scrapedDataDir, jobId);
     
     if (!fs.existsSync(jobDir)) {
-      return res.status(404).json({ error: 'Job not found' });
+      return res.status(404).json({
+        status: 404,
+        success: false,
+        creator: "Bera",
+        error: 'Job not found'
+      });
     }
     
     const configPath = path.join(jobDir, 'config.json');
     const progressPath = path.join(jobDir, 'progress.json');
     const resultPath = path.join(jobDir, 'result.json');
     
-    let response = {};
+    let response = {
+      status: 200,
+      success: true,
+      creator: "Bera",
+      jobId
+    };
     
     if (fs.existsSync(configPath)) {
       response.config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
@@ -464,7 +483,12 @@ app.get('/api/scrape/status/:jobId', (req, res) => {
     res.json(response);
     
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({
+      status: 500,
+      success: false,
+      creator: "Bera",
+      error: error.message
+    });
   }
 });
 
@@ -475,12 +499,21 @@ app.get('/api/scrape/download/:jobId/:filename', (req, res) => {
     const filePath = path.join(scrapedDataDir, jobId, filename);
     
     if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'File not found' });
+      return res.status(404).json({
+        status: 404,
+        success: false,
+        creator: "Bera",
+        error: 'File not found'
+      });
     }
     
     const stats = fs.statSync(filePath);
     
-    res.setHeader('Content-Type', 'video/mp4');
+    let contentType = 'application/octet-stream';
+    if (filename.endsWith('.mp4')) contentType = 'video/mp4';
+    if (filename.endsWith('.mp3')) contentType = 'audio/mpeg';
+    
+    res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', stats.size);
     
@@ -488,7 +521,12 @@ app.get('/api/scrape/download/:jobId/:filename', (req, res) => {
     stream.pipe(res);
     
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({
+      status: 500,
+      success: false,
+      creator: "Bera",
+      error: error.message
+    });
   }
 });
 
@@ -504,7 +542,12 @@ app.get('/api/download/file/:fileId', (req, res) => {
     const file = files.find(f => f.startsWith(fileId));
     
     if (!file) {
-      return res.status(404).json({ error: 'File not found' });
+      return res.status(404).json({
+        status: 404,
+        success: false,
+        creator: "Bera",
+        error: 'File not found'
+      });
     }
     
     const filePath = path.join(downloadsDir, file);
@@ -532,7 +575,12 @@ app.get('/api/download/file/:fileId', (req, res) => {
     }, 5 * 60 * 1000);
     
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({
+      status: 500,
+      success: false,
+      creator: "Bera",
+      error: error.message
+    });
   }
 });
 
@@ -544,7 +592,12 @@ app.get('/api/stream/:fileId', (req, res) => {
     const file = files.find(f => f.startsWith(fileId) && f.endsWith('.mp3'));
     
     if (!file) {
-      return res.status(404).json({ error: 'File not found' });
+      return res.status(404).json({
+        status: 404,
+        success: false,
+        creator: "Bera",
+        error: 'File not found'
+      });
     }
     
     const filePath = path.join(downloadsDir, file);
@@ -580,290 +633,451 @@ app.get('/api/stream/:fileId', (req, res) => {
     }
     
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({
+      status: 500,
+      success: false,
+      creator: "Bera",
+      error: error.message
+    });
   }
 });
 
-// ========== WEB SOCKET FOR REAL-TIME UPDATES ==========
-
-wss.on('connection', (ws) => {
-  console.log('WebSocket client connected');
-  
-  ws.on('message', (message) => {
-    try {
-      const data = JSON.parse(message);
-      
-      if (data.type === 'subscribe_job') {
-        // Subscribe to job updates
-        const jobId = data.jobId;
-        const progressFile = path.join(scrapedDataDir, jobId, 'progress.json');
-        
-        // Send updates every 2 seconds
-        const interval = setInterval(() => {
-          if (fs.existsSync(progressFile)) {
-            try {
-              const progress = JSON.parse(fs.readFileSync(progressFile, 'utf8'));
-              ws.send(JSON.stringify({
-                type: 'job_update',
-                jobId,
-                progress
-              }));
-            } catch (e) {}
-          }
-        }, 2000);
-        
-        ws.on('close', () => {
-          clearInterval(interval);
-        });
-      }
-    } catch (error) {
-      console.error('WebSocket error:', error);
+// Video streaming endpoint
+app.get('/api/stream/video/:fileId', (req, res) => {
+  try {
+    const { fileId } = req.params;
+    const files = fs.readdirSync(downloadsDir);
+    const file = files.find(f => f.startsWith(fileId) && f.endsWith('.mp4'));
+    
+    if (!file) {
+      return res.status(404).json({
+        status: 404,
+        success: false,
+        creator: "Bera",
+        error: 'File not found'
+      });
     }
-  });
-  
-  ws.on('close', () => {
-    console.log('WebSocket client disconnected');
-  });
+    
+    const filePath = path.join(downloadsDir, file);
+    const stats = fs.statSync(filePath);
+    
+    const range = req.headers.range;
+    
+    if (range) {
+      const parts = range.replace(/bytes=/, "").split("-");
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : stats.size - 1;
+      
+      const chunksize = (end - start) + 1;
+      const fileStream = fs.createReadStream(filePath, { start, end });
+      
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${stats.size}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunksize,
+        'Content-Type': 'video/mp4'
+      });
+      
+      fileStream.pipe(res);
+    } else {
+      res.writeHead(200, {
+        'Content-Length': stats.size,
+        'Content-Type': 'video/mp4'
+      });
+      
+      fs.createReadStream(filePath).pipe(res);
+    }
+    
+  } catch (error) {
+    res.status(500).json({
+      status: 500,
+      success: false,
+      creator: "Bera",
+      error: error.message
+    });
+  }
 });
 
-// ========== DASHBOARD & MONITORING ==========
+// ========== SIMPLE DASHBOARD ==========
 
-// Dashboard
 app.get('/dashboard', (req, res) => {
+  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  
   const html = `
   <!DOCTYPE html>
   <html>
   <head>
-    <title>Video Download & Scraping Dashboard</title>
+    <title>Video Download & Scraping System</title>
     <style>
-      body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; padding: 20px; }
       .container { max-width: 1200px; margin: 0 auto; }
-      .card { background: white; padding: 20px; margin: 20px 0; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-      .btn { background: #3498db; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin: 10px 5px; }
-      .btn:hover { background: #2980b9; }
-      .section { margin: 30px 0; }
-      .form-group { margin: 15px 0; }
-      input, select { width: 100%; padding: 10px; margin: 5px 0; border: 1px solid #ddd; border-radius: 5px; }
-      .progress-bar { width: 100%; height: 20px; background: #eee; border-radius: 10px; overflow: hidden; }
-      .progress { height: 100%; background: #2ecc71; transition: width 0.3s; }
-      .job-list { max-height: 400px; overflow-y: auto; }
-      .job-item { padding: 10px; border-bottom: 1px solid #eee; }
-      .status { padding: 5px 10px; border-radius: 5px; color: white; }
-      .status-pending { background: #f39c12; }
-      .status-running { background: #3498db; }
-      .status-completed { background: #2ecc71; }
-      .status-failed { background: #e74c3c; }
+      .header { text-align: center; color: white; padding: 40px 20px; }
+      .header h1 { font-size: 3em; margin-bottom: 10px; }
+      .header p { font-size: 1.2em; opacity: 0.9; }
+      .card { background: white; border-radius: 15px; padding: 30px; margin-bottom: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); }
+      .section-title { color: #333; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 2px solid #667eea; }
+      .form-group { margin-bottom: 20px; }
+      .form-group label { display: block; margin-bottom: 8px; color: #555; font-weight: 500; }
+      .form-group input, .form-group select, .form-group textarea { width: 100%; padding: 12px 15px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 16px; transition: border 0.3s; }
+      .form-group input:focus, .form-group select:focus { border-color: #667eea; outline: none; }
+      .btn { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; padding: 15px 30px; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; display: inline-block; text-decoration: none; }
+      .btn:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4); }
+      .btn-secondary { background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%); }
+      .result { margin-top: 20px; padding: 20px; border-radius: 8px; background: #f8f9fa; display: none; }
+      .result.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; display: block; }
+      .result.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; display: block; }
+      .result pre { background: white; padding: 15px; border-radius: 5px; overflow-x: auto; margin-top: 10px; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 30px; }
+      .api-box { background: #f8f9fa; padding: 20px; border-radius: 10px; border-left: 4px solid #667eea; }
+      .api-box h3 { color: #333; margin-bottom: 10px; }
+      .api-box code { background: #e9ecef; padding: 5px 10px; border-radius: 4px; font-family: monospace; }
+      .tab-container { margin-top: 30px; }
+      .tabs { display: flex; background: white; border-radius: 10px 10px 0 0; overflow: hidden; }
+      .tab { padding: 15px 30px; background: #f8f9fa; border: none; font-size: 16px; cursor: pointer; flex: 1; text-align: center; }
+      .tab.active { background: white; font-weight: 600; color: #667eea; }
+      .tab-content { display: none; background: white; padding: 30px; border-radius: 0 0 10px 10px; }
+      .tab-content.active { display: block; }
+      .status-indicator { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 10px; }
+      .status-online { background: #4CAF50; }
+      .status-offline { background: #f44336; }
     </style>
   </head>
   <body>
     <div class="container">
-      <h1>🎬 Video Download & Scraping Dashboard</h1>
-      
-      <div class="section">
-        <h2>YouTube Downloader</h2>
-        <div class="card">
-          <div class="form-group">
-            <label>YouTube URL:</label>
-            <input type="text" id="youtubeUrl" placeholder="https://www.youtube.com/watch?v=...">
-          </div>
-          <div class="form-group">
-            <label>Format:</label>
-            <select id="format">
-              <option value="mp3">MP3 Audio</option>
-              <option value="mp4">MP4 Video</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Quality:</label>
-            <select id="quality">
-              <option value="128">128kbps (MP3)</option>
-              <option value="192">192kbps (MP3)</option>
-              <option value="320">320kbps (MP3)</option>
-              <option value="360p">360p (MP4)</option>
-              <option value="720p">720p (MP4)</option>
-              <option value="1080p">1080p (MP4)</option>
-            </select>
-          </div>
-          <button class="btn" onclick="downloadYouTube()">Download</button>
-          <div id="youtubeResult"></div>
+      <div class="header">
+        <h1>🎬 Video Download & Scraping System</h1>
+        <p>Download YouTube videos and scrape websites with ease</p>
+        <div style="margin-top: 20px;">
+          <span class="status-indicator status-online"></span>
+          <span>System Status: Online</span>
         </div>
       </div>
       
-      <div class="section">
-        <h2>Web Scraper</h2>
-        <div class="card">
-          <div class="form-group">
-            <label>Website URL:</label>
-            <input type="text" id="scrapeUrl" placeholder="https://ssvid.net">
-          </div>
-          <div class="form-group">
-            <label>Max Depth:</label>
-            <input type="number" id="maxDepth" value="2" min="1" max="5">
-          </div>
-          <div class="form-group">
-            <label>
-              <input type="checkbox" id="downloadVideos"> Download Videos
-            </label>
-          </div>
-          <div class="form-group">
-            <label>
-              <input type="checkbox" id="useProxies"> Use Proxies
-            </label>
-          </div>
-          <button class="btn" onclick="startScraping()">Start Scraping</button>
-          <div id="scrapeResult"></div>
+      <div class="tab-container">
+        <div class="tabs">
+          <button class="tab active" onclick="switchTab('youtube')">YouTube Downloader</button>
+          <button class="tab" onclick="switchTab('scraper')">Web Scraper</button>
+          <button class="tab" onclick="switchTab('api')">API Documentation</button>
         </div>
-      </div>
-      
-      <div class="section">
-        <h2>Active Jobs</h2>
-        <div class="card">
-          <div id="jobsList" class="job-list"></div>
+        
+        <div id="youtube" class="tab-content active">
+          <div class="card">
+            <h2 class="section-title">YouTube Video Downloader</h2>
+            <div class="grid">
+              <div>
+                <h3>MP3 Audio Download</h3>
+                <div class="form-group">
+                  <label for="youtubeUrlMp3">YouTube URL:</label>
+                  <input type="text" id="youtubeUrlMp3" placeholder="https://www.youtube.com/watch?v=...">
+                </div>
+                <div class="form-group">
+                  <label for="qualityMp3">Audio Quality:</label>
+                  <select id="qualityMp3">
+                    <option value="128">128kbps</option>
+                    <option value="192" selected>192kbps</option>
+                    <option value="320">320kbps</option>
+                  </select>
+                </div>
+                <button class="btn" onclick="downloadYouTube('mp3')">Download MP3</button>
+              </div>
+              
+              <div>
+                <h3>MP4 Video Download</h3>
+                <div class="form-group">
+                  <label for="youtubeUrlMp4">YouTube URL:</label>
+                  <input type="text" id="youtubeUrlMp4" placeholder="https://www.youtube.com/watch?v=...">
+                </div>
+                <div class="form-group">
+                  <label for="qualityMp4">Video Quality:</label>
+                  <select id="qualityMp4">
+                    <option value="360p">360p</option>
+                    <option value="480p">480p</option>
+                    <option value="720p" selected>720p</option>
+                    <option value="1080p">1080p</option>
+                  </select>
+                </div>
+                <button class="btn btn-secondary" onclick="downloadYouTube('mp4')">Download MP4</button>
+              </div>
+            </div>
+            <div id="youtubeResult" class="result"></div>
+          </div>
+        </div>
+        
+        <div id="scraper" class="tab-content">
+          <div class="card">
+            <h2 class="section-title">Web Scraper</h2>
+            <div class="form-group">
+              <label for="scrapeUrl">Website URL:</label>
+              <input type="text" id="scrapeUrl" placeholder="https://ssvid.net">
+            </div>
+            <div class="grid">
+              <div class="form-group">
+                <label for="maxDepth">Max Depth:</label>
+                <input type="number" id="maxDepth" value="2" min="1" max="5">
+              </div>
+              <div class="form-group">
+                <label for="qualityScrape">Video Quality:</label>
+                <select id="qualityScrape">
+                  <option value="360p">360p</option>
+                  <option value="720p" selected>720p</option>
+                  <option value="1080p">1080p</option>
+                  <option value="best">Best Available</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group">
+              <label style="display: inline-flex; align-items: center; gap: 10px;">
+                <input type="checkbox" id="downloadVideos" checked> Download Videos
+              </label>
+            </div>
+            <button class="btn" onclick="startScraping()">Start Scraping</button>
+            <div id="scrapeResult" class="result"></div>
+          </div>
+        </div>
+        
+        <div id="api" class="tab-content">
+          <div class="card">
+            <h2 class="section-title">API Documentation</h2>
+            <div class="grid">
+              <div class="api-box">
+                <h3>YouTube MP3 Download</h3>
+                <p><strong>Endpoint:</strong> GET /api/download/youtube-mp3</p>
+                <p><strong>Parameters:</strong></p>
+                <code>apikey=bera&url=YOUTUBE_URL&quality=128</code>
+                <p><strong>Example:</strong></p>
+                <code>${baseUrl}/api/download/youtube-mp3?apikey=bera&url=https://youtu.be/dQw4w9WgXcQ&quality=192</code>
+              </div>
+              
+              <div class="api-box">
+                <h3>YouTube MP4 Download</h3>
+                <p><strong>Endpoint:</strong> GET /api/download/youtube-mp4</p>
+                <p><strong>Parameters:</strong></p>
+                <code>apikey=bera&url=YOUTUBE_URL&quality=720p</code>
+                <p><strong>Example:</strong></p>
+                <code>${baseUrl}/api/download/youtube-mp4?apikey=bera&url=https://youtu.be/dQw4w9WgXcQ&quality=720p</code>
+              </div>
+              
+              <div class="api-box">
+                <h3>Start Scraping Job</h3>
+                <p><strong>Endpoint:</strong> POST /api/scrape/start</p>
+                <p><strong>Body (JSON):</strong></p>
+                <code>{"url":"https://ssvid.net","download_videos":true}</code>
+              </div>
+              
+              <div class="api-box">
+                <h3>Check Job Status</h3>
+                <p><strong>Endpoint:</strong> GET /api/scrape/status/:jobId</p>
+                <p><strong>Example:</strong></p>
+                <code>${baseUrl}/api/scrape/status/JOB_ID</code>
+              </div>
+            </div>
+            
+            <div style="margin-top: 30px; padding: 20px; background: #f8f9fa; border-radius: 10px;">
+              <h3>Quick Test</h3>
+              <p>Test the system with a sample YouTube video:</p>
+              <button class="btn" onclick="testSystem()">Test System</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
     
     <script>
-      const baseUrl = window.location.origin;
+      const baseUrl = '${baseUrl}';
       
-      async function downloadYouTube() {
-        const url = document.getElementById('youtubeUrl').value;
-        const format = document.getElementById('format').value;
-        const quality = document.getElementById('quality').value;
+      function switchTab(tabName) {
+        // Hide all tabs
+        document.querySelectorAll('.tab-content').forEach(tab => {
+          tab.classList.remove('active');
+        });
+        document.querySelectorAll('.tab').forEach(tab => {
+          tab.classList.remove('active');
+        });
+        
+        // Show selected tab
+        document.getElementById(tabName).classList.add('active');
+        document.querySelectorAll('.tab').forEach(tab => {
+          if (tab.textContent.toLowerCase().includes(tabName)) {
+            tab.classList.add('active');
+          }
+        });
+      }
+      
+      async function downloadYouTube(format) {
+        const urlInput = format === 'mp3' ? 'youtubeUrlMp3' : 'youtubeUrlMp4';
+        const qualityInput = format === 'mp3' ? 'qualityMp3' : 'qualityMp4';
+        
+        const url = document.getElementById(urlInput).value;
+        const quality = document.getElementById(qualityInput).value;
         
         if (!url) {
-          alert('Please enter a YouTube URL');
+          showResult('youtubeResult', 'Please enter a YouTube URL', 'error');
           return;
         }
         
-        const endpoint = format === 'mp3' 
-          ? '/api/download/youtube-mp3' 
-          : '/api/download/youtube-mp4';
-        
-        const response = await fetch(
-          \`\${baseUrl}\${endpoint}?apikey=bera&url=\${encodeURIComponent(url)}&quality=\${quality}\`
-        );
-        
-        const result = await response.json();
+        const endpoint = format === 'mp3' ? '/api/download/youtube-mp3' : '/api/download/youtube-mp4';
         const resultDiv = document.getElementById('youtubeResult');
         
-        if (result.success) {
-          resultDiv.innerHTML = \`
-            <div style="margin-top: 20px; padding: 15px; background: #d4edda; border-radius: 5px;">
+        showResult('youtubeResult', 'Downloading...', '');
+        
+        try {
+          const response = await fetch(
+            \`\${baseUrl}\${endpoint}?apikey=bera&url=\${encodeURIComponent(url)}&quality=\${quality}\`
+          );
+          const data = await response.json();
+          
+          if (data.success) {
+            const html = \`
               <h3>✅ Download Ready!</h3>
-              <p><strong>Title:</strong> \${result.result.title}</p>
+              <p><strong>Title:</strong> \${data.result.title}</p>
+              <p><strong>Format:</strong> \${data.result.format.toUpperCase()}</p>
+              <p><strong>Quality:</strong> \${data.result.quality}</p>
               <p><strong>Download:</strong> 
-                <a href="\${baseUrl}\${result.result.download_url}" target="_blank">Click here</a>
+                <a href="\${data.result.download_url}" target="_blank" class="btn" style="padding: 8px 15px; font-size: 14px; margin-left: 10px;">Download Now</a>
               </p>
               <p><strong>Stream:</strong> 
-                <a href="\${baseUrl}\${result.result.direct_stream}" target="_blank">Play online</a>
+                <a href="\${data.result.direct_stream}" target="_blank" style="color: #667eea;">Play Online</a>
               </p>
-            </div>
-          \`;
-          
-          // Auto-download after 2 seconds
-          setTimeout(() => {
-            window.open(baseUrl + result.result.download_url, '_blank');
-          }, 2000);
-        } else {
-          resultDiv.innerHTML = \`
-            <div style="margin-top: 20px; padding: 15px; background: #f8d7da; border-radius: 5px;">
-              <h3>❌ Error</h3>
-              <p>\${result.error}</p>
-            </div>
-          \`;
+              <p><small>Note: File will auto-delete after 5 minutes</small></p>
+            \`;
+            showResult('youtubeResult', html, 'success');
+            
+            // Auto-open download after 2 seconds
+            setTimeout(() => {
+              window.open(data.result.download_url, '_blank');
+            }, 2000);
+          } else {
+            showResult('youtubeResult', \`Error: \${data.error}\`, 'error');
+          }
+        } catch (error) {
+          showResult('youtubeResult', \`Error: \${error.message}\`, 'error');
         }
       }
       
       async function startScraping() {
         const url = document.getElementById('scrapeUrl').value;
         const maxDepth = document.getElementById('maxDepth').value;
+        const quality = document.getElementById('qualityScrape').value;
         const downloadVideos = document.getElementById('downloadVideos').checked;
-        const useProxies = document.getElementById('useProxies').checked;
         
         if (!url) {
-          alert('Please enter a website URL');
+          showResult('scrapeResult', 'Please enter a website URL', 'error');
           return;
         }
         
-        const response = await fetch(baseUrl + '/api/scrape/start', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            url,
-            max_depth: parseInt(maxDepth),
-            download_videos: downloadVideos,
-            use_proxies: useProxies,
-            quality: 'best'
-          })
-        });
-        
-        const result = await response.json();
         const resultDiv = document.getElementById('scrapeResult');
+        showResult('scrapeResult', 'Starting scraping job...', '');
         
-        if (result.success) {
-          resultDiv.innerHTML = \`
-            <div style="margin-top: 20px; padding: 15px; background: #d4edda; border-radius: 5px;">
-              <h3>✅ Scraping Job Started</h3>
-              <p><strong>Job ID:</strong> \${result.jobId}</p>
-              <p><strong>Monitor:</strong> 
-                <a href="\${baseUrl}/api/scrape/status/\${result.jobId}" target="_blank">View Progress</a>
-              </p>
-            </div>
-          \`;
+        try {
+          const response = await fetch(baseUrl + '/api/scrape/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              url,
+              max_depth: parseInt(maxDepth),
+              download_videos: downloadVideos,
+              quality: quality,
+              use_proxies: false
+            })
+          });
           
-          // Start monitoring this job
-          monitorJob(result.jobId);
-        } else {
-          resultDiv.innerHTML = \`
-            <div style="margin-top: 20px; padding: 15px; background: #f8d7da; border-radius: 5px;">
-              <h3>❌ Error</h3>
-              <p>\${result.error}</p>
-            </div>
-          \`;
+          const data = await response.json();
+          
+          if (data.success) {
+            const html = \`
+              <h3>✅ Scraping Job Started</h3>
+              <p><strong>Job ID:</strong> \${data.jobId}</p>
+              <p><strong>Monitor URL:</strong> 
+                <a href="\${data.monitor_url}" target="_blank">View Progress</a>
+              </p>
+              <p><strong>Status:</strong> 
+                <a href="#" onclick="checkJobStatus('\${data.jobId}'); return false;" style="color: #667eea;">Check Status Now</a>
+              </p>
+              <p><small>Note: Scraping may take several minutes depending on website size</small></p>
+            \`;
+            showResult('scrapeResult', html, 'success');
+          } else {
+            showResult('scrapeResult', \`Error: \${data.error}\`, 'error');
+          }
+        } catch (error) {
+          showResult('scrapeResult', \`Error: \${error.message}\`, 'error');
         }
       }
       
-      async function monitorJob(jobId) {
-        const ws = new WebSocket(\`ws://\${window.location.host}\`);
+      async function checkJobStatus(jobId) {
+        const resultDiv = document.getElementById('scrapeResult');
+        showResult('scrapeResult', 'Checking job status...', '');
         
-        ws.onopen = () => {
-          ws.send(JSON.stringify({
-            type: 'subscribe_job',
-            jobId: jobId
-          }));
-        };
-        
-        ws.onmessage = (event) => {
-          const data = JSON.parse(event.data);
-          if (data.type === 'job_update') {
-            updateJobDisplay(data.jobId, data.progress);
-          }
-        };
-        
-        // Also poll for updates
-        setInterval(async () => {
+        try {
           const response = await fetch(baseUrl + '/api/scrape/status/' + jobId);
           const data = await response.json();
-          updateJobsList();
-        }, 5000);
+          
+          if (data.success) {
+            let html = \`<h3>🔍 Job Status: \${data.result?.status || data.progress?.status || 'unknown'}</h3>\`;
+            
+            if (data.progress) {
+              html += \`
+                <p><strong>Pages Scraped:</strong> \${data.progress.pages_scraped || 0}</p>
+                <p><strong>Videos Found:</strong> \${data.progress.videos_found || 0}</p>
+                <p><strong>Videos Downloaded:</strong> \${data.progress.videos_downloaded || 0}</p>
+                <p><strong>Status:</strong> \${data.progress.status || 'running'}</p>
+              \`;
+            }
+            
+            if (data.files && data.files.length > 0) {
+              html += \`<h4>Downloaded Files:</h4><ul>\`;
+              data.files.forEach(file => {
+                html += \`<li><a href="\${file.url}" target="_blank">\${file.name}</a> (\${formatFileSize(file.size)})</li>\`;
+              });
+              html += \`</ul>\`;
+            }
+            
+            showResult('scrapeResult', html, 'success');
+          } else {
+            showResult('scrapeResult', \`Error: \${data.error}\`, 'error');
+          }
+        } catch (error) {
+          showResult('scrapeResult', \`Error: \${error.message}\`, 'error');
+        }
       }
       
-      function updateJobDisplay(jobId, progress) {
-        // Update job list
-        updateJobsList();
+      async function testSystem() {
+        // Test with Rick Astley - Never Gonna Give You Up
+        document.getElementById('youtubeUrlMp3').value = 'https://youtu.be/dQw4w9WgXcQ';
+        document.getElementById('youtubeUrlMp4').value = 'https://youtu.be/dQw4w9WgXcQ';
+        document.getElementById('scrapeUrl').value = 'https://ssvid.net';
+        
+        switchTab('youtube');
+        showResult('youtubeResult', 'Testing system with sample video...', '');
+        
+        // Test MP3 download
+        setTimeout(() => {
+          downloadYouTube('mp3');
+        }, 1000);
       }
       
-      async function updateJobsList() {
-        // Get list of all jobs
-        // This would need a new endpoint to list all jobs
-        // For now, we'll just show a message
-        const jobsList = document.getElementById('jobsList');
-        jobsList.innerHTML = '<p>Loading jobs...</p>';
+      function showResult(elementId, message, type) {
+        const element = document.getElementById(elementId);
+        element.innerHTML = message;
+        element.className = 'result';
+        if (type) {
+          element.classList.add(type);
+        }
+        element.style.display = 'block';
       }
       
-      // Initialize
-      updateJobsList();
+      function formatFileSize(bytes) {
+        if (bytes < 1024) return bytes + ' bytes';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+      }
+      
+      // Initialize with some example URLs
+      window.onload = () => {
+        document.getElementById('youtubeUrlMp3').value = 'https://youtu.be/dQw4w9WgXcQ';
+        document.getElementById('youtubeUrlMp4').value = 'https://youtu.be/dQw4w9WgXcQ';
+      };
     </script>
   </body>
   </html>
@@ -893,12 +1107,24 @@ app.get('/health', (req, res) => {
         free_memory: Math.round(os.freemem() / 1024 / 1024) + 'MB',
         uptime: Math.round(os.uptime() / 60) + ' minutes'
       }
+    },
+    endpoints: {
+      youtube_mp3: `/api/download/youtube-mp3?apikey=bera&url=YOUTUBE_URL`,
+      youtube_mp4: `/api/download/youtube-mp4?apikey=bera&url=YOUTUBE_URL`,
+      scrape_start: `POST /api/scrape/start`,
+      scrape_status: `GET /api/scrape/status/:jobId`,
+      file_download: `GET /api/download/file/:fileId`
     }
   });
 });
 
-// Upgrade HTTP to WebSocket
-const server = app.listen(PORT, '0.0.0.0', () => {
+// Home page
+app.get('/', (req, res) => {
+  res.redirect('/dashboard');
+});
+
+// Start server
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`
 ╔══════════════════════════════════════════════════════════════════╗
 ║                    🚀 VIDEO DOWNLOAD SYSTEM                      ║
@@ -918,11 +1144,12 @@ const server = app.listen(PORT, '0.0.0.0', () => {
    {"url": "https://ssvid.net", "download_videos": true}
 
 🔑 API Key: bera
-`);
 
-  server.on('upgrade', (request, socket, head) => {
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit('connection', ws, request);
-    });
-  });
+📂 Directories created:
+   Downloads: ${downloadsDir}
+   Scraped Data: ${scrapedDataDir}
+   Python Scraper: ${pythonDir}
+
+⚡ Ready to process requests...
+`);
 });
