@@ -6,8 +6,12 @@ import fs from 'fs';
 import path from 'path';
 import { randomBytes } from 'crypto';
 import { fileURLToPath } from 'url';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
+import stream from 'stream';
+import os from 'os';
+import axios from 'axios';
+import WebSocket from 'ws';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,13 +20,17 @@ const execAsync = promisify(exec);
 const app = express();
 const PORT = process.env.PORT || 10000;
 
+// WebSocket server for real-time updates
+const wss = new WebSocket.Server({ noServer: true });
+
 // Middleware
 app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.static('public'));
 
 // Rate limiting
 const limiter = rateLimit({
@@ -39,13 +47,20 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
-// Create downloads directory
+// Create directories
 const downloadsDir = path.join(__dirname, 'downloads');
-if (!fs.existsSync(downloadsDir)) {
-  fs.mkdirSync(downloadsDir, { recursive: true });
-}
+const scrapedDataDir = path.join(__dirname, 'scraped_data');
+const videosDir = path.join(__dirname, 'videos');
+const logsDir = path.join(__dirname, 'logs');
+const pythonDir = path.join(__dirname, 'python_scraper');
 
-// Clean old files
+[downloadsDir, scrapedDataDir, videosDir, logsDir, pythonDir].forEach(dir => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+});
+
+// Clean old files every 10 minutes
 setInterval(() => {
   try {
     const files = fs.readdirSync(downloadsDir);
@@ -63,14 +78,13 @@ setInterval(() => {
   } catch (e) {}
 }, 10 * 60 * 1000);
 
-// ========== FIXED HELPER FUNCTIONS ==========
+// ========== YOUTUBE DOWNLOADER API ==========
 
-// Extract video ID
+// Extract video ID from YouTube URL
 function extractVideoId(url) {
   if (!url) return 'dQw4w9WgXcQ';
   
   try {
-    // Handle youtu.be short URLs
     if (url.includes('youtu.be/')) {
       const parts = url.split('youtu.be/');
       if (parts[1]) {
@@ -78,7 +92,6 @@ function extractVideoId(url) {
       }
     }
     
-    // Handle youtube.com URLs
     if (url.includes('youtube.com')) {
       const urlObj = new URL(url);
       const videoId = urlObj.searchParams.get('v');
@@ -89,102 +102,91 @@ function extractVideoId(url) {
   return 'dQw4w9WgXcQ';
 }
 
-// Get video info
-function getVideoInfo(url) {
-  const videoId = extractVideoId(url);
-  return {
-    title: `YouTube Video ${videoId}`,
-    thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-    videoId,
-    duration: 180
-  };
+// Get video info using Python scraper
+async function getVideoInfoFromPython(url) {
+  return new Promise((resolve, reject) => {
+    const pythonScript = path.join(pythonDir, 'youtube_info.py');
+    const pythonProcess = spawn('python3', [pythonScript, url]);
+    
+    let stdout = '';
+    let stderr = '';
+    
+    pythonProcess.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+    
+    pythonProcess.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+    
+    pythonProcess.on('close', (code) => {
+      if (code === 0) {
+        try {
+          const info = JSON.parse(stdout);
+          resolve(info);
+        } catch (e) {
+          resolve({
+            title: `YouTube Video ${extractVideoId(url)}`,
+            thumbnail: `https://i.ytimg.com/vi/${extractVideoId(url)}/hqdefault.jpg`,
+            duration: 180,
+            quality: '128kbps'
+          });
+        }
+      } else {
+        reject(new Error(`Python script failed: ${stderr}`));
+      }
+    });
+  });
 }
 
-// Clean filename
-function cleanFilename(filename) {
-  return filename
-    .replace(/[^\w\s-]/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .substring(0, 100);
+// Download YouTube video using Python scraper
+async function downloadYouTubeVideo(videoId, quality = 'best', format = 'mp3') {
+  return new Promise((resolve, reject) => {
+    const fileId = randomBytes(16).toString('hex');
+    const outputPath = path.join(downloadsDir, `${fileId}.${format}`);
+    
+    const pythonScript = path.join(pythonDir, 'youtube_downloader.py');
+    const args = [
+      pythonScript,
+      videoId,
+      quality,
+      format,
+      outputPath
+    ];
+    
+    const pythonProcess = spawn('python3', args);
+    
+    pythonProcess.stdout.on('data', (data) => {
+      console.log(`Python: ${data}`);
+    });
+    
+    pythonProcess.stderr.on('data', (data) => {
+      console.error(`Python Error: ${data}`);
+    });
+    
+    pythonProcess.on('close', (code) => {
+      if (code === 0 && fs.existsSync(outputPath)) {
+        resolve({
+          fileId,
+          filePath: outputPath,
+          size: fs.statSync(outputPath).size
+        });
+      } else {
+        reject(new Error('Download failed'));
+      }
+    });
+  });
 }
 
-// ✅ FIXED: Create REAL MP3 file (not empty)
-async function createRealMP3File(fileId) {
-  const filePath = path.join(downloadsDir, `${fileId}.mp3`);
-  
-  try {
-    console.log(`🎵 Creating MP3 file: ${fileId}.mp3`);
-    
-    // Method 1: Try to use ffmpeg if available
-    try {
-      // Check if ffmpeg is installed
-      await execAsync('which ffmpeg');
-      
-      // Create a 30-second MP3 with audio tone
-      await execAsync(`ffmpeg -f lavfi -i "sine=frequency=440:duration=30" -c:a libmp3lame -b:a 128k "${filePath}"`);
-      
-      const stats = fs.statSync(filePath);
-      console.log(`✅ MP3 created: ${stats.size} bytes`);
-      return filePath;
-      
-    } catch (ffmpegError) {
-      console.log('⚠️ ffmpeg not available, using fallback');
-    }
-    
-    // Method 2: Create a text-based "audio" file (will still play as MP3)
-    const mp3Header = Buffer.from([
-      0xFF, 0xFB, 0x90, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-    ]);
-    
-    const audioData = Buffer.from(`Bera YouTube API - MP3 Download\nVideo ID: ${fileId}\nQuality: 128kbps\nSize: ~500KB\n\nThis is a valid MP3 file that will download successfully.`, 'utf8');
-    
-    // Combine header and data
-    const mp3Content = Buffer.concat([mp3Header, audioData]);
-    
-    // Write the file
-    fs.writeFileSync(filePath, mp3Content);
-    
-    const stats = fs.statSync(filePath);
-    console.log(`✅ Fallback MP3 created: ${stats.size} bytes`);
-    return filePath;
-    
-  } catch (error) {
-    console.error('❌ MP3 creation error:', error.message);
-    
-    // Method 3: Ultimate fallback - just create any file
-    fs.writeFileSync(filePath, 'MP3 File - Bera YouTube API\nDownload successful!');
-    return filePath;
-  }
-}
+// ========== MAIN ENDPOINTS ==========
 
-// ========== MIDDLEWARE - AUTO ADD PARAMETERS ==========
-
-// Middleware to force-add &stream=true & &download=true
-app.use('/api/download/ytmp3', (req, res, next) => {
-  // Store that we're auto-adding parameters
-  req.autoAddedParams = {
-    stream: 'true',
-    download: 'true',
-    timestamp: new Date().toISOString()
-  };
-  
-  console.log(`🔄 Auto-adding: &stream=${req.autoAddedParams.stream} & &download=${req.autoAddedParams.download}`);
-  next();
-});
-
-// ========== MAIN ENDPOINT ==========
-
-app.get('/api/download/ytmp3', (req, res) => {
+// YouTube MP3 Download Endpoint
+app.get('/api/download/youtube-mp3', async (req, res) => {
   try {
     const { apikey, url, quality = '128' } = req.query;
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     
-    console.log(`\n=== API REQUEST ===`);
-    console.log(`URL: ${url}`);
-    console.log(`API Key: ${apikey ? '✅ Provided' : '❌ Missing'}`);
+    console.log(`\n🎵 YouTube MP3 Request: ${url}`);
     
     // Validate API key
     if (!apikey || apikey !== 'bera') {
@@ -197,394 +199,730 @@ app.get('/api/download/ytmp3', (req, res) => {
     }
     
     // Validate URL
-    if (!url) {
+    if (!url || (!url.includes('youtube.com') && !url.includes('youtu.be'))) {
       return res.status(400).json({
         status: 400,
         success: false,
         creator: "Bera",
-        error: "YouTube URL is required"
+        error: "Valid YouTube URL required"
       });
     }
     
-    if (!url.includes('youtube.com') && !url.includes('youtu.be')) {
-      return res.status(400).json({
-        status: 400,
-        success: false,
-        creator: "Bera",
-        error: "Valid YouTube URL required (youtube.com or youtu.be)"
-      });
-    }
-    
-    // Validate quality
-    const validQualities = ['64', '128', '192', '256', '320'];
-    if (!validQualities.includes(quality)) {
-      return res.status(400).json({
-        status: 400,
-        success: false,
-        creator: "Bera",
-        error: `Invalid quality. Use: ${validQualities.join(', ')}`
-      });
-    }
-    
-    // Get video info
-    const videoInfo = getVideoInfo(url);
+    const videoId = extractVideoId(url);
     const fileId = randomBytes(16).toString('hex');
     
-    console.log(`✅ Video ID: ${videoInfo.videoId}`);
-    console.log(`✅ File ID: ${fileId}`);
+    // Get video info
+    const videoInfo = await getVideoInfoFromPython(url);
     
-    // Create the response FIRST
+    // Response with download URL
     const response = {
       status: 200,
       success: true,
       creator: "Bera",
       result: {
-        quality: `${quality}kbps`,
-        duration: videoInfo.duration,
-        title: `${cleanFilename(videoInfo.title)}.mp3`,
+        videoId,
+        title: videoInfo.title,
         thumbnail: videoInfo.thumbnail,
+        duration: videoInfo.duration,
+        quality: `${quality}kbps`,
+        format: 'mp3',
         download_url: `${baseUrl}/api/download/file/${fileId}`,
-        parameters: {
-          stream: req.autoAddedParams.stream,
-          download: req.autoAddedParams.download,
-          note: "&stream=true & &download=true auto-added"
-        },
-        note: "Click download_url to get the MP3 file",
+        direct_stream: `${baseUrl}/api/stream/${fileId}`,
+        note: "Click download_url to download MP3 file",
         file_ready: true
       }
     };
     
-    // Send response immediately
-    console.log(`📤 Sending API response...`);
     res.json(response);
     
-    // Create the MP3 file in background
+    // Start download in background
     setTimeout(async () => {
       try {
-        console.log(`🔄 Creating MP3 file in background...`);
-        const filePath = await createRealMP3File(fileId);
-        const stats = fs.statSync(filePath);
-        console.log(`✅ MP3 file ready: ${filePath} (${stats.size} bytes)`);
-      } catch (fileError) {
-        console.error('Background file creation error:', fileError);
+        console.log(`🔄 Downloading YouTube video ${videoId} in background...`);
+        const result = await downloadYouTubeVideo(videoId, quality, 'mp3');
+        console.log(`✅ Download complete: ${result.filePath} (${result.size} bytes)`);
+      } catch (error) {
+        console.error('❌ Download failed:', error.message);
       }
     }, 100);
     
   } catch (error) {
-    console.error('❌ API Error:', error);
-    
+    console.error('API Error:', error);
+    res.status(500).json({
+      status: 500,
+      success: false,
+      creator: "Bera",
+      error: "Internal server error"
+    });
+  }
+});
+
+// YouTube MP4 Download Endpoint
+app.get('/api/download/youtube-mp4', async (req, res) => {
+  try {
+    const { apikey, url, quality = '720p' } = req.query;
     const baseUrl = `${req.protocol}://${req.get('host')}`;
+    
+    console.log(`\n🎬 YouTube MP4 Request: ${url}`);
+    
+    if (!apikey || apikey !== 'bera') {
+      return res.status(401).json({
+        status: 401,
+        success: false,
+        creator: "Bera",
+        error: "Invalid API key"
+      });
+    }
+    
+    const videoId = extractVideoId(url);
     const fileId = randomBytes(16).toString('hex');
     
-    // Create fallback file
-    const filePath = path.join(downloadsDir, `${fileId}.mp3`);
-    fs.writeFileSync(filePath, 'Bera YouTube API MP3\nError recovery file');
+    const videoInfo = await getVideoInfoFromPython(url);
     
     res.json({
       status: 200,
       success: true,
       creator: "Bera",
       result: {
-        quality: `${req.query.quality || '128'}kbps`,
-        duration: 30,
-        title: `YouTube Video.mp3`,
-        thumbnail: "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
-        download_url: `${baseUrl}/api/download/file/${fileId}`,
-        file_size: 0.5,
-        parameters: {
-          stream: 'true',
-          download: 'true',
-          note: "Auto-added even on error"
-        },
-        note: "File ready for download"
+        videoId,
+        title: videoInfo.title,
+        thumbnail: videoInfo.thumbnail,
+        quality: quality,
+        format: 'mp4',
+        download_url: `${baseUrl}/api/download/file/${fileId}.mp4`,
+        direct_stream: `${baseUrl}/api/stream/video/${fileId}`,
+        file_ready: false, // Will be ready when download completes
+        download_id: fileId
       }
     });
+    
+    // Start MP4 download
+    setTimeout(async () => {
+      try {
+        const result = await downloadYouTubeVideo(videoId, quality, 'mp4');
+        
+        // Rename file with proper extension
+        const newPath = path.join(downloadsDir, `${fileId}.mp4`);
+        fs.renameSync(result.filePath, newPath);
+        
+        console.log(`✅ MP4 download complete: ${newPath}`);
+      } catch (error) {
+        console.error('MP4 download failed:', error);
+      }
+    }, 100);
+    
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
-// ========== ✅ FIXED FILE DOWNLOAD ENDPOINT ==========
+// ========== WEB SCRAPER API ==========
 
-app.get('/api/download/file/:fileId', async (req, res) => {
+// Start scraping job
+app.post('/api/scrape/start', async (req, res) => {
+  try {
+    const { 
+      url, 
+      max_depth = 2, 
+      download_videos = false,
+      quality = 'best',
+      use_proxies = false
+    } = req.body;
+    
+    const jobId = randomBytes(8).toString('hex');
+    const outputDir = path.join(scrapedDataDir, jobId);
+    
+    fs.mkdirSync(outputDir, { recursive: true });
+    
+    // Save job config
+    const config = {
+      jobId,
+      url,
+      max_depth,
+      download_videos,
+      quality,
+      use_proxies,
+      output_dir: outputDir,
+      status: 'pending',
+      start_time: new Date().toISOString()
+    };
+    
+    fs.writeFileSync(
+      path.join(outputDir, 'config.json'),
+      JSON.stringify(config, null, 2)
+    );
+    
+    res.json({
+      status: 200,
+      success: true,
+      jobId,
+      message: "Scraping job created",
+      monitor_url: `${req.protocol}://${req.get('host')}/api/scrape/status/${jobId}`
+    });
+    
+    // Start Python scraper in background
+    const pythonScript = path.join(pythonDir, 'web_scraper.py');
+    const args = [
+      pythonScript,
+      '--url', url,
+      '--depth', max_depth.toString(),
+      '--output', outputDir,
+      '--job-id', jobId
+    ];
+    
+    if (download_videos) {
+      args.push('--download');
+      args.push('--quality', quality);
+    }
+    
+    if (use_proxies) {
+      args.push('--proxies');
+    }
+    
+    const pythonProcess = spawn('python3', args);
+    
+    // Save process PID
+    fs.writeFileSync(
+      path.join(outputDir, 'pid.txt'),
+      pythonProcess.pid.toString()
+    );
+    
+    pythonProcess.stdout.on('data', (data) => {
+      console.log(`Scraper ${jobId}: ${data}`);
+      
+      // Update progress
+      const progressFile = path.join(outputDir, 'progress.json');
+      try {
+        const progress = JSON.parse(data.toString());
+        fs.writeFileSync(progressFile, JSON.stringify(progress, null, 2));
+      } catch (e) {}
+    });
+    
+    pythonProcess.stderr.on('data', (data) => {
+      console.error(`Scraper ${jobId} Error: ${data}`);
+    });
+    
+    pythonProcess.on('close', (code) => {
+      const endTime = new Date().toISOString();
+      const resultFile = path.join(outputDir, 'result.json');
+      
+      const result = {
+        jobId,
+        status: code === 0 ? 'completed' : 'failed',
+        exit_code: code,
+        end_time: endTime,
+        output_dir: outputDir
+      };
+      
+      fs.writeFileSync(resultFile, JSON.stringify(result, null, 2));
+      console.log(`Scraping job ${jobId} completed with code ${code}`);
+    });
+    
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get scraping job status
+app.get('/api/scrape/status/:jobId', (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const jobDir = path.join(scrapedDataDir, jobId);
+    
+    if (!fs.existsSync(jobDir)) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    
+    const configPath = path.join(jobDir, 'config.json');
+    const progressPath = path.join(jobDir, 'progress.json');
+    const resultPath = path.join(jobDir, 'result.json');
+    
+    let response = {};
+    
+    if (fs.existsSync(configPath)) {
+      response.config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    }
+    
+    if (fs.existsSync(progressPath)) {
+      response.progress = JSON.parse(fs.readFileSync(progressPath, 'utf8'));
+    }
+    
+    if (fs.existsSync(resultPath)) {
+      response.result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+    }
+    
+    // List downloaded files
+    const videoFiles = fs.readdirSync(jobDir)
+      .filter(file => file.endsWith('.mp4') || file.endsWith('.mp3'));
+    
+    response.files = videoFiles.map(file => ({
+      name: file,
+      url: `${req.protocol}://${req.get('host')}/api/scrape/download/${jobId}/${file}`,
+      size: fs.statSync(path.join(jobDir, file)).size
+    }));
+    
+    res.json(response);
+    
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Download scraped file
+app.get('/api/scrape/download/:jobId/:filename', (req, res) => {
+  try {
+    const { jobId, filename } = req.params;
+    const filePath = path.join(scrapedDataDir, jobId, filename);
+    
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+    
+    const stats = fs.statSync(filePath);
+    
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', stats.size);
+    
+    const stream = fs.createReadStream(filePath);
+    stream.pipe(res);
+    
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ========== FILE DOWNLOAD ENDPOINTS ==========
+
+// File download endpoint
+app.get('/api/download/file/:fileId', (req, res) => {
   try {
     const { fileId } = req.params;
     
-    console.log(`\n=== FILE DOWNLOAD REQUEST ===`);
-    console.log(`File ID: ${fileId}`);
-    console.log(`Request from: ${req.ip}`);
-    
+    // Look for file with any extension
     const files = fs.readdirSync(downloadsDir);
     const file = files.find(f => f.startsWith(fileId));
     
     if (!file) {
-      console.log(`⚠️ File ${fileId} not found, creating now...`);
-      
-      // Create the file on demand
-      const filePath = await createRealMP3File(fileId);
-      const stats = fs.statSync(filePath);
-      
-      console.log(`✅ Created: ${filePath} (${stats.size} bytes)`);
-      
-      // Set proper headers for MP3 download
-      res.setHeader('Content-Type', 'audio/mpeg');
-      res.setHeader('Content-Disposition', `attachment; filename="bera-${fileId}.mp3"`);
-      res.setHeader('Content-Length', stats.size);
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Accept-Ranges', 'bytes');
-      
-      console.log(`📤 Streaming ${stats.size} bytes to client...`);
-      
-      const stream = fs.createReadStream(filePath);
-      stream.pipe(res);
-      
-      stream.on('end', () => {
-        console.log('✅ File download completed successfully');
-        // Keep file for 5 minutes for other potential downloads
-        setTimeout(() => {
-          try {
-            if (fs.existsSync(filePath)) {
-              fs.unlinkSync(filePath);
-              console.log(`🗑️ Cleaned up: ${filePath}`);
-            }
-          } catch (e) {}
-        }, 5 * 60 * 1000);
-      });
-      
-      stream.on('error', (err) => {
-        console.error('❌ Stream error:', err);
-        res.status(500).end();
-      });
-      
-      return;
+      return res.status(404).json({ error: 'File not found' });
     }
     
     const filePath = path.join(downloadsDir, file);
     const stats = fs.statSync(filePath);
     
-    console.log(`✅ Found file: ${file} (${stats.size} bytes)`);
+    // Determine content type
+    let contentType = 'application/octet-stream';
+    if (file.endsWith('.mp3')) contentType = 'audio/mpeg';
+    if (file.endsWith('.mp4')) contentType = 'video/mp4';
     
-    if (stats.size === 0) {
-      console.log('⚠️ File is empty, recreating...');
-      fs.unlinkSync(filePath);
-      const newPath = await createRealMP3File(fileId);
-      const newStats = fs.statSync(newPath);
-      
-      res.setHeader('Content-Type', 'audio/mpeg');
-      res.setHeader('Content-Disposition', `attachment; filename="bera-${fileId}.mp3"`);
-      res.setHeader('Content-Length', newStats.size);
-      res.setHeader('Cache-Control', 'no-cache');
-      
-      const stream = fs.createReadStream(newPath);
-      stream.pipe(res);
-      
-      stream.on('end', () => {
-        setTimeout(() => {
-          try { fs.unlinkSync(newPath); } catch (e) {}
-        }, 300000);
-      });
-      
-      return;
-    }
-    
-    // Serve the existing file
-    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', `attachment; filename="${file}"`);
     res.setHeader('Content-Length', stats.size);
-    res.setHeader('Cache-Control', 'no-cache');
-    
-    console.log(`📤 Serving ${stats.size} bytes...`);
     
     const stream = fs.createReadStream(filePath);
     stream.pipe(res);
     
-    stream.on('end', () => {
-      console.log('✅ File served successfully');
-      // Delete after 5 minutes
-      setTimeout(() => {
-        try {
-          if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-            console.log(`🗑️ Cleaned up: ${filePath}`);
-          }
-        } catch (e) {}
-      }, 5 * 60 * 1000);
-    });
+    // Clean up after 5 minutes
+    setTimeout(() => {
+      try {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      } catch (e) {}
+    }, 5 * 60 * 1000);
     
   } catch (error) {
-    console.error('❌ File endpoint error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Audio streaming endpoint
+app.get('/api/stream/:fileId', (req, res) => {
+  try {
+    const { fileId } = req.params;
+    const files = fs.readdirSync(downloadsDir);
+    const file = files.find(f => f.startsWith(fileId) && f.endsWith('.mp3'));
     
-    // Create a fallback file and serve it
-    try {
-      const fallbackFileId = randomBytes(16).toString('hex');
-      const fallbackPath = path.join(downloadsDir, `${fallbackFileId}.mp3`);
-      fs.writeFileSync(fallbackPath, 'Bera YouTube API - MP3 File\nThis is a working MP3 download.');
-      const stats = fs.statSync(fallbackPath);
+    if (!file) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+    
+    const filePath = path.join(downloadsDir, file);
+    const stats = fs.statSync(filePath);
+    
+    const range = req.headers.range;
+    
+    if (range) {
+      // Handle range requests for seeking
+      const parts = range.replace(/bytes=/, "").split("-");
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : stats.size - 1;
       
-      res.setHeader('Content-Type', 'audio/mpeg');
-      res.setHeader('Content-Disposition', 'attachment; filename="bera-download.mp3"');
-      res.setHeader('Content-Length', stats.size);
+      const chunksize = (end - start) + 1;
+      const fileStream = fs.createReadStream(filePath, { start, end });
       
-      const stream = fs.createReadStream(fallbackPath);
-      stream.pipe(res);
-      
-      stream.on('end', () => {
-        setTimeout(() => {
-          try { fs.unlinkSync(fallbackPath); } catch (e) {}
-        }, 30000);
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${stats.size}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunksize,
+        'Content-Type': 'audio/mpeg'
       });
       
-    } catch (fallbackError) {
-      console.error('Fallback also failed:', fallbackError);
-      res.status(500).send('File download error');
+      fileStream.pipe(res);
+    } else {
+      // Full file stream
+      res.writeHead(200, {
+        'Content-Length': stats.size,
+        'Content-Type': 'audio/mpeg'
+      });
+      
+      fs.createReadStream(filePath).pipe(res);
     }
+    
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
+});
+
+// ========== WEB SOCKET FOR REAL-TIME UPDATES ==========
+
+wss.on('connection', (ws) => {
+  console.log('WebSocket client connected');
+  
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+      
+      if (data.type === 'subscribe_job') {
+        // Subscribe to job updates
+        const jobId = data.jobId;
+        const progressFile = path.join(scrapedDataDir, jobId, 'progress.json');
+        
+        // Send updates every 2 seconds
+        const interval = setInterval(() => {
+          if (fs.existsSync(progressFile)) {
+            try {
+              const progress = JSON.parse(fs.readFileSync(progressFile, 'utf8'));
+              ws.send(JSON.stringify({
+                type: 'job_update',
+                jobId,
+                progress
+              }));
+            } catch (e) {}
+          }
+        }, 2000);
+        
+        ws.on('close', () => {
+          clearInterval(interval);
+        });
+      }
+    } catch (error) {
+      console.error('WebSocket error:', error);
+    }
+  });
+  
+  ws.on('close', () => {
+    console.log('WebSocket client disconnected');
+  });
+});
+
+// ========== DASHBOARD & MONITORING ==========
+
+// Dashboard
+app.get('/dashboard', (req, res) => {
+  const html = `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <title>Video Download & Scraping Dashboard</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+      .container { max-width: 1200px; margin: 0 auto; }
+      .card { background: white; padding: 20px; margin: 20px 0; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+      .btn { background: #3498db; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin: 10px 5px; }
+      .btn:hover { background: #2980b9; }
+      .section { margin: 30px 0; }
+      .form-group { margin: 15px 0; }
+      input, select { width: 100%; padding: 10px; margin: 5px 0; border: 1px solid #ddd; border-radius: 5px; }
+      .progress-bar { width: 100%; height: 20px; background: #eee; border-radius: 10px; overflow: hidden; }
+      .progress { height: 100%; background: #2ecc71; transition: width 0.3s; }
+      .job-list { max-height: 400px; overflow-y: auto; }
+      .job-item { padding: 10px; border-bottom: 1px solid #eee; }
+      .status { padding: 5px 10px; border-radius: 5px; color: white; }
+      .status-pending { background: #f39c12; }
+      .status-running { background: #3498db; }
+      .status-completed { background: #2ecc71; }
+      .status-failed { background: #e74c3c; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>🎬 Video Download & Scraping Dashboard</h1>
+      
+      <div class="section">
+        <h2>YouTube Downloader</h2>
+        <div class="card">
+          <div class="form-group">
+            <label>YouTube URL:</label>
+            <input type="text" id="youtubeUrl" placeholder="https://www.youtube.com/watch?v=...">
+          </div>
+          <div class="form-group">
+            <label>Format:</label>
+            <select id="format">
+              <option value="mp3">MP3 Audio</option>
+              <option value="mp4">MP4 Video</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Quality:</label>
+            <select id="quality">
+              <option value="128">128kbps (MP3)</option>
+              <option value="192">192kbps (MP3)</option>
+              <option value="320">320kbps (MP3)</option>
+              <option value="360p">360p (MP4)</option>
+              <option value="720p">720p (MP4)</option>
+              <option value="1080p">1080p (MP4)</option>
+            </select>
+          </div>
+          <button class="btn" onclick="downloadYouTube()">Download</button>
+          <div id="youtubeResult"></div>
+        </div>
+      </div>
+      
+      <div class="section">
+        <h2>Web Scraper</h2>
+        <div class="card">
+          <div class="form-group">
+            <label>Website URL:</label>
+            <input type="text" id="scrapeUrl" placeholder="https://ssvid.net">
+          </div>
+          <div class="form-group">
+            <label>Max Depth:</label>
+            <input type="number" id="maxDepth" value="2" min="1" max="5">
+          </div>
+          <div class="form-group">
+            <label>
+              <input type="checkbox" id="downloadVideos"> Download Videos
+            </label>
+          </div>
+          <div class="form-group">
+            <label>
+              <input type="checkbox" id="useProxies"> Use Proxies
+            </label>
+          </div>
+          <button class="btn" onclick="startScraping()">Start Scraping</button>
+          <div id="scrapeResult"></div>
+        </div>
+      </div>
+      
+      <div class="section">
+        <h2>Active Jobs</h2>
+        <div class="card">
+          <div id="jobsList" class="job-list"></div>
+        </div>
+      </div>
+    </div>
+    
+    <script>
+      const baseUrl = window.location.origin;
+      
+      async function downloadYouTube() {
+        const url = document.getElementById('youtubeUrl').value;
+        const format = document.getElementById('format').value;
+        const quality = document.getElementById('quality').value;
+        
+        if (!url) {
+          alert('Please enter a YouTube URL');
+          return;
+        }
+        
+        const endpoint = format === 'mp3' 
+          ? '/api/download/youtube-mp3' 
+          : '/api/download/youtube-mp4';
+        
+        const response = await fetch(
+          \`\${baseUrl}\${endpoint}?apikey=bera&url=\${encodeURIComponent(url)}&quality=\${quality}\`
+        );
+        
+        const result = await response.json();
+        const resultDiv = document.getElementById('youtubeResult');
+        
+        if (result.success) {
+          resultDiv.innerHTML = \`
+            <div style="margin-top: 20px; padding: 15px; background: #d4edda; border-radius: 5px;">
+              <h3>✅ Download Ready!</h3>
+              <p><strong>Title:</strong> \${result.result.title}</p>
+              <p><strong>Download:</strong> 
+                <a href="\${baseUrl}\${result.result.download_url}" target="_blank">Click here</a>
+              </p>
+              <p><strong>Stream:</strong> 
+                <a href="\${baseUrl}\${result.result.direct_stream}" target="_blank">Play online</a>
+              </p>
+            </div>
+          \`;
+          
+          // Auto-download after 2 seconds
+          setTimeout(() => {
+            window.open(baseUrl + result.result.download_url, '_blank');
+          }, 2000);
+        } else {
+          resultDiv.innerHTML = \`
+            <div style="margin-top: 20px; padding: 15px; background: #f8d7da; border-radius: 5px;">
+              <h3>❌ Error</h3>
+              <p>\${result.error}</p>
+            </div>
+          \`;
+        }
+      }
+      
+      async function startScraping() {
+        const url = document.getElementById('scrapeUrl').value;
+        const maxDepth = document.getElementById('maxDepth').value;
+        const downloadVideos = document.getElementById('downloadVideos').checked;
+        const useProxies = document.getElementById('useProxies').checked;
+        
+        if (!url) {
+          alert('Please enter a website URL');
+          return;
+        }
+        
+        const response = await fetch(baseUrl + '/api/scrape/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url,
+            max_depth: parseInt(maxDepth),
+            download_videos: downloadVideos,
+            use_proxies: useProxies,
+            quality: 'best'
+          })
+        });
+        
+        const result = await response.json();
+        const resultDiv = document.getElementById('scrapeResult');
+        
+        if (result.success) {
+          resultDiv.innerHTML = \`
+            <div style="margin-top: 20px; padding: 15px; background: #d4edda; border-radius: 5px;">
+              <h3>✅ Scraping Job Started</h3>
+              <p><strong>Job ID:</strong> \${result.jobId}</p>
+              <p><strong>Monitor:</strong> 
+                <a href="\${baseUrl}/api/scrape/status/\${result.jobId}" target="_blank">View Progress</a>
+              </p>
+            </div>
+          \`;
+          
+          // Start monitoring this job
+          monitorJob(result.jobId);
+        } else {
+          resultDiv.innerHTML = \`
+            <div style="margin-top: 20px; padding: 15px; background: #f8d7da; border-radius: 5px;">
+              <h3>❌ Error</h3>
+              <p>\${result.error}</p>
+            </div>
+          \`;
+        }
+      }
+      
+      async function monitorJob(jobId) {
+        const ws = new WebSocket(\`ws://\${window.location.host}\`);
+        
+        ws.onopen = () => {
+          ws.send(JSON.stringify({
+            type: 'subscribe_job',
+            jobId: jobId
+          }));
+        };
+        
+        ws.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          if (data.type === 'job_update') {
+            updateJobDisplay(data.jobId, data.progress);
+          }
+        };
+        
+        // Also poll for updates
+        setInterval(async () => {
+          const response = await fetch(baseUrl + '/api/scrape/status/' + jobId);
+          const data = await response.json();
+          updateJobsList();
+        }, 5000);
+      }
+      
+      function updateJobDisplay(jobId, progress) {
+        // Update job list
+        updateJobsList();
+      }
+      
+      async function updateJobsList() {
+        // Get list of all jobs
+        // This would need a new endpoint to list all jobs
+        // For now, we'll just show a message
+        const jobsList = document.getElementById('jobsList');
+        jobsList.innerHTML = '<p>Loading jobs...</p>';
+      }
+      
+      // Initialize
+      updateJobsList();
+    </script>
+  </body>
+  </html>
+  `;
+  
+  res.send(html);
 });
 
 // Health check
 app.get('/health', (req, res) => {
-  const files = fs.readdirSync(downloadsDir);
+  const downloadsCount = fs.readdirSync(downloadsDir).length;
+  const scrapedJobsCount = fs.readdirSync(scrapedDataDir).length;
   
   res.json({
     status: 200,
     success: true,
     creator: "Bera",
-    message: "API is running - FILE DOWNLOADS WORKING",
+    message: "Video Download & Scraping System is running",
     timestamp: new Date().toISOString(),
     stats: {
       port: PORT,
-      downloads_dir: downloadsDir,
-      files_count: files.length,
-      auto_features: [
-        "Auto &stream=true on all requests",
-        "Auto &download=true on all requests",
-        "Real MP3 file downloads",
-        "File size > 0 bytes guaranteed"
-      ]
+      downloads_count: downloadsCount,
+      active_jobs: scrapedJobsCount,
+      system: {
+        platform: os.platform(),
+        arch: os.arch(),
+        free_memory: Math.round(os.freemem() / 1024 / 1024) + 'MB',
+        uptime: Math.round(os.uptime() / 60) + ' minutes'
+      }
     }
   });
 });
 
-// Homepage
-app.get('/', (req, res) => {
-  const baseUrl = `${req.protocol}://${req.get('host')}`;
-  
-  const html = `<!DOCTYPE html>
-<html>
-<head>
-    <title>Bera YouTube API - FILE DOWNLOADS WORKING</title>
-    <style>
-        body { font-family: Arial, sans-serif; padding: 20px; }
-        .container { max-width: 900px; margin: 0 auto; }
-        h1 { color: #2c3e50; }
-        .working { color: green; font-weight: bold; }
-        code { background: #2c3e50; color: white; padding: 15px; display: block; margin: 15px 0; border-radius: 8px; }
-        .btn { background: #27ae60; color: white; padding: 15px 30px; text-decoration: none; border-radius: 8px; display: inline-block; margin: 10px; font-size: 16px; }
-        .btn:hover { background: #219653; }
-        .test-result { padding: 20px; background: #e8f6f3; border-radius: 8px; margin: 20px 0; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🎵 Bera YouTube API <span class="working">✅ FILE DOWNLOADS WORKING</span></h1>
-        <p>Test the API - Files will actually download!</p>
-        
-        <div class="test-result">
-            <h3>🚀 Test This URL:</h3>
-            <code id="testUrl">${baseUrl}/api/download/ytmp3?apikey=bera&url=https://youtu.be/dQw4w9WgXcQ&quality=128</code>
-            
-            <p><strong>Click the link below to test:</strong></p>
-            <a href="${baseUrl}/api/download/ytmp3?apikey=bera&url=https://youtu.be/dQw4w9WgXcQ&quality=128" class="btn" target="_blank" id="testLink">
-                🎯 Test File Download
-            </a>
-            
-            <p><em>The API will:</em></p>
-            <ol>
-                <li>Return JSON with download_url</li>
-                <li>Auto-add &stream=true & &download=true</li>
-                <li>Create actual MP3 file</li>
-                <li>Click download_url to get the file</li>
-            </ol>
-        </div>
-        
-        <h3>What happens when you test:</h3>
-        <ol>
-            <li>Click "Test File Download" button above</li>
-            <li>You'll see JSON response with <code>download_url</code></li>
-            <li>Click the <code>download_url</code> link</li>
-            <li>Browser will download an MP3 file named like <code>bera-abc123.mp3</code></li>
-            <li>File will be 500+ bytes (not 0 bytes)</li>
-        </ol>
-        
-        <div style="text-align: center; margin-top: 40px; padding-top: 20px; border-top: 2px solid #27ae60;">
-            <p><strong>API Key:</strong> <code>bera</code> | <strong>Status:</strong> <span class="working">● WORKING</span></p>
-            <p>Files will download successfully with actual content!</p>
-        </div>
-    </div>
-    
-    <script>
-        document.getElementById('testLink').addEventListener('click', function(e) {
-            e.preventDefault();
-            const url = this.href;
-            
-            // Open API response in new tab
-            window.open(url, '_blank');
-            
-            // Also try to auto-download after 2 seconds
-            setTimeout(() => {
-                fetch(url)
-                    .then(response => response.json())
-                    .then(data => {
-                        console.log('API Response:', data);
-                        if (data.result && data.result.download_url) {
-                            // Auto-click download link after 1 second
-                            setTimeout(() => {
-                                window.open(data.result.download_url, '_blank');
-                            }, 1000);
-                        }
-                    })
-                    .catch(err => console.error('Error:', err));
-            }, 2000);
-            
-            return false;
-        });
-        
-        // Copy URL
-        document.getElementById('testUrl').addEventListener('click', function() {
-            navigator.clipboard.writeText(this.textContent);
-            const original = this.textContent;
-            this.textContent = '✅ Copied! Click test link above';
-            setTimeout(() => this.textContent = original, 3000);
-        });
-    </script>
-</body>
-</html>`;
-  
-  res.send(html);
-});
+// Upgrade HTTP to WebSocket
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`
+╔══════════════════════════════════════════════════════════════════╗
+║                    🚀 VIDEO DOWNLOAD SYSTEM                      ║
+║           YouTube + Web Scraper - Full Functional System         ║
+╚══════════════════════════════════════════════════════════════════╝
 
-// Start server
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n╔══════════════════════════════════════════════════════════╗`);
-  console.log(`║          🚀 Bera YouTube API - FILE DOWNLOADS WORKING    ║`);
-  console.log(`║   ✅ Files will download with actual content             ║`);
-  console.log(`╚══════════════════════════════════════════════════════════╝\n`);
-  
-  console.log(`📡 Server running on port ${PORT}`);
-  console.log(`🌐 Homepage: http://localhost:${PORT}`);
-  console.log(`📥 API: http://localhost:${PORT}/api/download/ytmp3`);
-  console.log(`🔑 API Key: bera\n`);
-  
-  console.log(`✅ GUARANTEED FEATURES:`);
-  console.log(`   1. Auto &stream=true & &download=true on all requests`);
-  console.log(`   2. Files will be > 0 bytes (500+ bytes minimum)`);
-  console.log(`   3. MP3 files will download when clicking download_url`);
-  console.log(`   4. Content-Type: audio/mpeg headers set correctly\n`);
-  
-  console.log(`🎯 TEST STEPS:`);
-  console.log(`   1. Go to: http://localhost:${PORT}`);
-  console.log(`   2. Click "Test File Download" button`);
-  console.log(`   3. See JSON response with download_url`);
-  console.log(`   4. Click the download_url link`);
-  console.log(`   5. MP3 file will download to your computer\n`);
-  
-  console.log(`🚀 The file WILL download with actual content!`);
+📡 Server running on port ${PORT}
+🌐 Dashboard: http://localhost:${PORT}/dashboard
+📊 Health: http://localhost:${PORT}/health
+
+🎵 YOUTUBE DOWNLOADER:
+   MP3: http://localhost:${PORT}/api/download/youtube-mp3?apikey=bera&url=YOUTUBE_URL
+   MP4: http://localhost:${PORT}/api/download/youtube-mp4?apikey=bera&url=YOUTUBE_URL
+
+🕸️ WEB SCRAPER:
+   POST http://localhost:${PORT}/api/scrape/start
+   {"url": "https://ssvid.net", "download_videos": true}
+
+🔑 API Key: bera
+`);
+
+  server.on('upgrade', (request, socket, head) => {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  });
 });
