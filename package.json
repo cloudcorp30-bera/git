@@ -1,33 +1,28 @@
 {
-  "name": "video-download-scraping-system",
-  "version": "1.0.0",
-  "description": "Video download and web scraping system without WebSocket dependency",
+  "name": "bera-ai-system",
+  "version": "4.0.0",
+  "description": "BERA AI - Build-Execute-Review-Automate Artificial Intelligence",
   "main": "server.js",
-  "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js",
-    "test": "echo \"No tests specified\" && exit 0",
-    "setup": "mkdir -p downloads scraped_data python_scraper logs",
-    "clean": "rm -rf downloads/* scraped_data/* logs/*"
+    "dev": "nodemon server.js"
   },
   "keywords": [
-    "youtube-downloader",
-    "web-scraper",
-    "video-downloader",
-    "mp3-downloader",
-    "scraping-api"
+    "ai",
+    "development",
+    "multi-agent",
+    "code-generation",
+    "automation"
   ],
-  "author": "Bera",
+  "author": "Bruce Bera",
   "license": "MIT",
   "dependencies": {
     "express": "^4.18.2",
-    "helmet": "^7.1.0",
-    "cors": "^2.8.5",
-    "express-rate-limit": "^7.1.5",
-    "axios": "^1.6.2"
+    "axios": "^1.6.2",
+    "dotenv": "^16.3.1",
+    "cors": "^2.8.5"
   },
-  "engines": {
-    "node": ">=16.0.0"
+  "devDependencies": {
+    "nodemon": "^3.0.1"
   }
 }
