@@ -12,7 +12,7 @@ const userSessions = new Map();
 // BERA AI API Configuration
 const API_CONFIG = {
     openai: {
-        key: process.env.OPENAI_API_KEY || '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',
+        key: process.env.OPENAI_API_KEY || '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',
         endpoint: 'https://api.openai.com/v1/chat/completions'
     },
     gemini: {
