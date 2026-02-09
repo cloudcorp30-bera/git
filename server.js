@@ -1,890 +1,356 @@
-import express from 'express';
-import rateLimit from 'express-rate-limit';
-import helmet from 'helmet';
-import cors from 'cors';
-import fs from 'fs';
-import path from 'path';
-import { randomBytes } from 'crypto';
-import { fileURLToPath } from 'url';
-import { spawn, exec } from 'child_process';
-import { promisify } from 'util';
-import os from 'os';
-import axios from 'axios';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const execAsync = promisify(exec);
+const express = require('express');
+const path = require('path');
+const axios = require('axios');
+require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
 
-// Trust proxy for Render.com
-app.set('trust proxy', 1);
+// In-memory storage for user sessions
+const userSessions = new Map();
+
+// BERA AI API Configuration
+const API_CONFIG = {
+    openai: {
+        key: process.env.OPENAI_API_KEY || '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',
+        endpoint: 'https://api.openai.com/v1/chat/completions'
+    },
+    gemini: {
+        key: process.env.GEMINI_API_KEY || 'AIzaSyDy_-cFa6R08UJRT4TcdVEhKUZqyNSljEQ',
+        endpoint: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent'
+    },
+    grok: {
+        key: process.env.GROK_API_KEY || 'xai-9lWoOejeRloEBKn6xDERoAodITl8NGbBlupxAzZl3ly8rT0oGrbk5D8DEqGoCImhZCDD535usWS8YwOp',
+        chatEndpoint: 'https://api.x.ai/v1/chat/completions',
+        imageEndpoint: 'https://api.x.ai/v1/images/generations'
+    }
+};
 
 // Middleware
-app.use(helmet({
-  crossOriginResourcePolicy: { policy: "cross-origin" }
-}));
-app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json());
+app.use(express.static('public'));
+app.use(express.urlencoded({ extended: true }));
 
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 50, // Lower limit for resource-intensive operations
-  message: JSON.stringify({
-    status: 429,
-    success: false,
-    creator: "Bera",
-    error: 'Rate limit exceeded'
-  }),
-  standardHeaders: true,
-  legacyHeaders: false,
-  trustProxy: true,
-});
-
-app.use('/api/', limiter);
-
-// Create directories
-const downloadsDir = path.join(__dirname, 'downloads');
-const tempDir = path.join(os.tmpdir(), 'youtube-downloads');
-
-[downloadsDir, tempDir].forEach(dir => {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-});
-
-// Clean old files every 10 minutes
-setInterval(() => {
-  try {
-    const files = fs.readdirSync(downloadsDir);
-    const now = Date.now();
-    
-    files.forEach(file => {
-      const filePath = path.join(downloadsDir, file);
-      try {
-        const stats = fs.statSync(filePath);
-        if (now - stats.mtime.getTime() > 30 * 60 * 1000) {
-          fs.unlinkSync(filePath);
-          console.log(`Cleaned up: ${file}`);
-        }
-      } catch (e) {}
-    });
-  } catch (e) {}
-}, 10 * 60 * 1000);
-
-// ========== HELPER FUNCTIONS ==========
-
-// Extract video ID from YouTube URL
-function extractVideoId(url) {
-  if (!url) return null;
-  
-  try {
-    if (url.includes('youtu.be/')) {
-      const parts = url.split('youtu.be/');
-      if (parts[1]) {
-        return parts[1].split('?')[0].split('&')[0].substring(0, 11);
-      }
+// User Session Management
+function getUserSession(sessionId) {
+    if (!userSessions.has(sessionId)) {
+        userSessions.set(sessionId, {
+            domainPattern: null,
+            projectCounter: 1,
+            deployedProjects: [],
+            sessionId: sessionId,
+            createdAt: new Date()
+        });
     }
-    
-    if (url.includes('youtube.com')) {
-      const urlObj = new URL(url);
-      const videoId = urlObj.searchParams.get('v');
-      if (videoId) return videoId.substring(0, 11);
-    }
-  } catch (e) {}
-  
-  return null;
+    return userSessions.get(sessionId);
 }
 
-// Get video info using yt-dlp
-async function getVideoInfo(url) {
-  try {
-    // First try to get info from yt-dlp
-    const videoId = extractVideoId(url);
-    
-    // Fallback info if yt-dlp fails
-    const fallbackInfo = {
-      title: `YouTube Video ${videoId || 'Unknown'}`,
-      thumbnail: videoId ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` : '',
-      duration: 180,
-      viewCount: 0,
-      uploader: 'YouTube Creator'
-    };
-    
+// Domain Pattern Validation
+function validateDomainPattern(pattern) {
+    if (!pattern) return false;
+    if (!pattern.includes('{ID}') && 
+        !pattern.includes('{PROJECT_ID}') && 
+        !pattern.includes('{NUMBER}')) {
+        return false;
+    }
     try {
-      // Try to get info using yt-dlp
-      const { stdout } = await execAsync(`yt-dlp --dump-json --no-warnings "${url}"`);
-      const info = JSON.parse(stdout);
-      
-      return {
-        title: info.title || fallbackInfo.title,
-        thumbnail: info.thumbnail || fallbackInfo.thumbnail,
-        duration: info.duration || fallbackInfo.duration,
-        viewCount: info.view_count || fallbackInfo.viewCount,
-        uploader: info.uploader || fallbackInfo.uploader,
-        description: info.description ? info.description.substring(0, 200) : '',
-        videoId: videoId
-      };
-    } catch (error) {
-      console.log('Using fallback video info');
-      return fallbackInfo;
+        new URL(pattern.replace('{ID}', '001'));
+        return true;
+    } catch {
+        return false;
     }
-  } catch (error) {
-    console.error('Error getting video info:', error);
-    return null;
-  }
 }
 
-// Download YouTube video using yt-dlp
-async function downloadYouTubeVideo(url, format = 'mp3', quality = 'best') {
-  return new Promise((resolve, reject) => {
-    const fileId = randomBytes(16).toString('hex');
-    const outputTemplate = path.join(downloadsDir, `${fileId}.%(ext)s`);
+// Generate Next URL
+function generateNextURL(session) {
+    if (!session.domainPattern) return null;
     
-    console.log(`Starting download: ${url} as ${format}`);
-    
-    // Build yt-dlp command
-    let args = [
-      'yt-dlp',
-      '-o', outputTemplate,
-      '--no-warnings',
-      '--progress',
-      '--newline',
-    ];
-    
-    if (format === 'mp3') {
-      args.push(
-        '-x', // Extract audio
-        '--audio-format', 'mp3',
-        '--audio-quality', quality.replace('kbps', '')
-      );
-    } else {
-      // For video
-      args.push(
-        '-f', `bestvideo[height<=${quality.replace('p', '')}]+bestaudio/best[height<=${quality.replace('p', '')}]`,
-        '--merge-output-format', 'mp4'
-      );
-    }
-    
-    args.push(url);
-    
-    console.log('Running command:', args.join(' '));
-    
-    const downloadProcess = spawn('yt-dlp', args.slice(1));
-    
-    let stdout = '';
-    let stderr = '';
-    let downloadedFile = null;
-    
-    downloadProcess.stdout.on('data', (data) => {
-      const output = data.toString();
-      stdout += output;
-      
-      // Parse progress
-      if (output.includes('[download]')) {
-        console.log('Download progress:', output.trim());
-      }
-      
-      // Look for downloaded filename
-      const match = output.match(/\[ffmpeg\] Merging formats into "(.+\.(mp3|mp4))"/);
-      if (match) {
-        downloadedFile = match[1];
-      }
-    });
-    
-    downloadProcess.stderr.on('data', (data) => {
-      stderr += data.toString();
-      console.error('Download stderr:', data.toString());
-    });
-    
-    downloadProcess.on('close', async (code) => {
-      if (code === 0) {
-        try {
-          // Find the downloaded file
-          if (!downloadedFile) {
-            // Look for file in downloads directory
-            const files = fs.readdirSync(downloadsDir);
-            downloadedFile = files.find(f => f.includes(fileId));
-            if (downloadedFile) {
-              downloadedFile = path.join(downloadsDir, downloadedFile);
+    const id = session.projectCounter.toString().padStart(3, '0');
+    return session.domainPattern.replace(/\{ID\}|\{PROJECT_ID\}|\{NUMBER\}/g, id);
+}
+
+// AI API Calls
+async function callOpenAI(prompt, model = "gpt-4") {
+    try {
+        const response = await axios.post(API_CONFIG.openai.endpoint, {
+            model: model,
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0.7
+        }, {
+            headers: {
+                'Authorization': `Bearer ${API_CONFIG.openai.key}`,
+                'Content-Type': 'application/json'
             }
-          }
-          
-          if (downloadedFile && fs.existsSync(downloadedFile)) {
-            const stats = fs.statSync(downloadedFile);
-            
-            console.log(`Download successful: ${downloadedFile} (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
-            
-            resolve({
-              success: true,
-              filePath: downloadedFile,
-              fileId: fileId,
-              size: stats.size,
-              sizeMB: (stats.size / 1024 / 1024).toFixed(2)
-            });
-          } else {
-            reject(new Error('Downloaded file not found'));
-          }
-        } catch (error) {
-          reject(error);
-        }
-      } else {
-        reject(new Error(`Download failed with code ${code}: ${stderr}`));
-      }
-    });
-    
-    // Timeout after 5 minutes
-    setTimeout(() => {
-      downloadProcess.kill();
-      reject(new Error('Download timeout after 5 minutes'));
-    }, 5 * 60 * 1000);
-  });
-}
-
-// Check if yt-dlp is available
-async function checkYtDlp() {
-  try {
-    await execAsync('which yt-dlp');
-    console.log('✅ yt-dlp is available');
-    return true;
-  } catch (error) {
-    console.log('❌ yt-dlp not found, trying to install...');
-    try {
-      await execAsync('pip3 install yt-dlp');
-      console.log('✅ yt-dlp installed successfully');
-      return true;
-    } catch (installError) {
-      console.error('Failed to install yt-dlp:', installError.message);
-      return false;
-    }
-  }
-}
-
-// Install required dependencies
-async function installDependencies() {
-  console.log('Installing required dependencies...');
-  
-  try {
-    // Install yt-dlp
-    await execAsync('pip3 install yt-dlp --upgrade');
-    
-    // Install ffmpeg for audio conversion
-    try {
-      await execAsync('which ffmpeg');
-      console.log('✅ ffmpeg is already installed');
+        });
+        return response.data.choices[0].message.content;
     } catch (error) {
-      console.log('Installing ffmpeg...');
-      try {
-        // Try different package managers
-        await execAsync('apt-get update && apt-get install -y ffmpeg');
-      } catch (e) {
-        try {
-          await execAsync('brew install ffmpeg');
-        } catch (e2) {
-          console.log('Could not install ffmpeg automatically');
-        }
-      }
+        console.error('OpenAI Error:', error.response?.data || error.message);
+        return `Error: ${error.message}`;
     }
-    
-    console.log('✅ Dependencies installed successfully');
-    return true;
-  } catch (error) {
-    console.error('Failed to install dependencies:', error);
-    return false;
-  }
 }
 
-// ========== API ENDPOINTS ==========
+async function callGemini(prompt) {
+    try {
+        const response = await axios.post(
+            `${API_CONFIG.gemini.endpoint}?key=${API_CONFIG.gemini.key}`,
+            {
+                contents: [{
+                    parts: [{ text: prompt }]
+                }]
+            }
+        );
+        return response.data.candidates[0].content.parts[0].text;
+    } catch (error) {
+        console.error('Gemini Error:', error.response?.data || error.message);
+        return `Error: ${error.message}`;
+    }
+}
 
-// YouTube MP3 Download Endpoint
-app.get('/api/download/youtube-mp3', async (req, res) => {
-  try {
-    const { apikey, url, quality = '192' } = req.query;
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
+async function callGrokChat(prompt) {
+    try {
+        const response = await axios.post(API_CONFIG.grok.chatEndpoint, {
+            model: "grok-beta",
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0.7
+        }, {
+            headers: {
+                'Authorization': `Bearer ${API_CONFIG.grok.key}`,
+                'Content-Type': 'application/json'
+            }
+        });
+        return response.data.choices[0].message.content;
+    } catch (error) {
+        console.error('Grok Error:', error.response?.data || error.message);
+        return `Error: ${error.message}`;
+    }
+}
+
+async function generateImageWithGrok(prompt) {
+    try {
+        const response = await axios.post(API_CONFIG.grok.imageEndpoint, {
+            model: "grok-2-image",
+            prompt: prompt,
+            n: 1,
+            response_format: "url"
+        }, {
+            headers: {
+                'Authorization': `Bearer ${API_CONFIG.grok.key}`,
+                'Content-Type': 'application/json'
+            }
+        });
+        return response.data.data[0].url;
+    } catch (error) {
+        console.error('Grok Image Error:', error.response?.data || error.message);
+        return `Error: ${error.message}`;
+    }
+}
+
+// BERA AI Multi-Agent Processing
+async function processBERAProject(requirements, session) {
+    const projectId = session.projectCounter.toString().padStart(3, '0');
+    const deploymentURL = generateNextURL(session);
     
-    console.log(`\n🎵 YouTube MP3 Request: ${url}`);
+    console.log(`🚀 Starting Project ${projectId}: ${requirements}`);
     
-    // Validate API key
-    if (!apikey || apikey !== 'bera') {
-      return res.status(401).json({
-        status: 401,
-        success: false,
-        creator: "Bera",
-        error: "Invalid API key. Use: apikey=bera"
-      });
+    // 1. BERA ANALYZER
+    const analysisPrompt = `Analyze these requirements and provide a project overview: "${requirements}"
+    Format as JSON with: name, type, stack, complexity, features`;
+    
+    const analysis = await callOpenAI(analysisPrompt);
+    
+    // 2. BERA GENERATOR
+    const generationPrompt = `Generate complete, runnable code for: ${requirements}
+    Based on analysis: ${analysis}
+    Include HTML, CSS, JavaScript for a web application.
+    Make it production-ready and well-commented.`;
+    
+    const generatedCode = await callOpenAI(generationPrompt, "gpt-4-turbo");
+    
+    // 3. BERA DEBUGGER
+    const debugPrompt = `Review and debug this code for any issues:\n${generatedCode}
+    Provide specific fixes and improvements.`;
+    
+    const debugReport = await callGemini(debugPrompt);
+    
+    // 4. BERA TESTER
+    const testPrompt = `Create test scenarios for this application: ${requirements}
+    Based on code: ${generatedCode.substring(0, 500)}...
+    Provide test cases and expected outcomes.`;
+    
+    const testResults = await callGrokChat(testPrompt);
+    
+    // 5. BERA IMAGE GENERATOR
+    const imagePrompt = `Professional web application UI for: ${requirements}
+    Modern design, clean interface, responsive layout`;
+    
+    let imageURL = null;
+    if (requirements.toLowerCase().includes('ui') || 
+        requirements.toLowerCase().includes('design') ||
+        requirements.toLowerCase().includes('image')) {
+        imageURL = await generateImageWithGrok(imagePrompt);
     }
     
-    // Validate URL
-    if (!url || (!url.includes('youtube.com') && !url.includes('youtu.be'))) {
-      return res.status(400).json({
-        status: 400,
-        success: false,
-        creator: "Bera",
-        error: "Valid YouTube URL required (youtube.com or youtu.be)"
-      });
-    }
-    
-    // Get video info
-    const videoInfo = await getVideoInfo(url);
-    if (!videoInfo) {
-      return res.status(400).json({
-        status: 400,
-        success: false,
-        creator: "Bera",
-        error: "Could not fetch video information"
-      });
-    }
-    
-    const fileId = randomBytes(16).toString('hex');
-    
-    // Immediate response with download URL
-    const response = {
-      status: 200,
-      success: true,
-      creator: "Bera",
-      result: {
-        videoId: extractVideoId(url),
-        title: videoInfo.title,
-        thumbnail: videoInfo.thumbnail,
-        duration: videoInfo.duration,
-        uploader: videoInfo.uploader,
-        quality: `${quality}kbps`,
-        format: 'mp3',
-        download_url: `${baseUrl}/api/download/file/${fileId}`,
-        direct_stream: `${baseUrl}/api/stream/${fileId}`,
-        note: "File is being downloaded. Click download_url when ready.",
-        download_id: fileId,
-        status: "processing"
-      }
+    // Create project record
+    const project = {
+        id: projectId,
+        name: requirements.substring(0, 50) + (requirements.length > 50 ? '...' : ''),
+        requirements: requirements,
+        deploymentURL: deploymentURL,
+        createdAt: new Date(),
+        analysis: analysis,
+        code: generatedCode,
+        debugReport: debugReport,
+        testResults: testResults,
+        imageURL: imageURL,
+        status: 'completed'
     };
     
-    res.json(response);
+    session.deployedProjects.push(project);
+    session.projectCounter++;
     
-    // Start download in background
-    setTimeout(async () => {
-      try {
-        console.log(`🔄 Starting real MP3 download...`);
-        const ytDlpAvailable = await checkYtDlp();
-        
-        if (!ytDlpAvailable) {
-          console.log('Installing dependencies...');
-          await installDependencies();
-        }
-        
-        const result = await downloadYouTubeVideo(url, 'mp3', quality);
-        
-        if (result.success) {
-          // Rename file to match fileId
-          const newPath = path.join(downloadsDir, `${fileId}.mp3`);
-          fs.renameSync(result.filePath, newPath);
-          
-          console.log(`✅ Real MP3 download complete: ${newPath} (${result.sizeMB} MB)`);
-          
-          // Update status file
-          const statusFile = path.join(downloadsDir, `${fileId}.json`);
-          fs.writeFileSync(statusFile, JSON.stringify({
-            status: 'ready',
-            filePath: newPath,
-            size: result.size,
-            downloadedAt: new Date().toISOString()
-          }));
-        }
-      } catch (error) {
-        console.error('❌ Real download failed:', error.message);
-        
-        // Create fallback file if real download fails
-        try {
-          const fallbackPath = path.join(downloadsDir, `${fileId}.mp3`);
-          const fallbackContent = await axios.get('https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3', {
-            responseType: 'arraybuffer'
-          });
-          
-          fs.writeFileSync(fallbackPath, Buffer.from(fallbackContent.data));
-          console.log(`✅ Created fallback MP3: ${fallbackPath}`);
-        } catch (fallbackError) {
-          console.error('Fallback also failed:', fallbackError.message);
-        }
-      }
-    }, 100);
-    
-  } catch (error) {
-    console.error('API Error:', error);
-    res.status(500).json({
-      status: 500,
-      success: false,
-      creator: "Bera",
-      error: "Internal server error"
-    });
-  }
+    return project;
+}
+
+// Routes
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// YouTube MP4 Download Endpoint
-app.get('/api/download/youtube-mp4', async (req, res) => {
-  try {
-    const { apikey, url, quality = '720p' } = req.query;
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
+app.post('/api/set-domain', (req, res) => {
+    const { sessionId, domainPattern } = req.body;
+    const session = getUserSession(sessionId);
     
-    console.log(`\n🎬 YouTube MP4 Request: ${url}`);
-    
-    if (!apikey || apikey !== 'bera') {
-      return res.status(401).json({
-        status: 401,
-        success: false,
-        creator: "Bera",
-        error: "Invalid API key"
-      });
+    if (!validateDomainPattern(domainPattern)) {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid domain pattern. Must include {ID} placeholder and be a valid URL.'
+        });
     }
     
-    const videoInfo = await getVideoInfo(url);
-    const fileId = randomBytes(16).toString('hex');
+    session.domainPattern = domainPattern;
+    const nextURL = generateNextURL(session);
     
     res.json({
-      status: 200,
-      success: true,
-      creator: "Bera",
-      result: {
-        videoId: extractVideoId(url),
-        title: videoInfo?.title || `YouTube Video ${extractVideoId(url)}`,
-        thumbnail: videoInfo?.thumbnail || `https://i.ytimg.com/vi/${extractVideoId(url)}/hqdefault.jpg`,
-        quality: quality,
-        format: 'mp4',
-        download_url: `${baseUrl}/api/download/file/${fileId}`,
-        direct_stream: `${baseUrl}/api/stream/video/${fileId}`,
-        note: "File is being downloaded. This may take a few minutes.",
-        download_id: fileId,
-        status: "processing"
-      }
+        success: true,
+        message: '✅ Domain pattern saved',
+        nextURL: nextURL,
+        nextId: session.projectCounter.toString().padStart(3, '0'),
+        sessionId: sessionId
     });
-    
-    // Start MP4 download in background
-    setTimeout(async () => {
-      try {
-        console.log(`🔄 Starting real MP4 download (${quality})...`);
-        await checkYtDlp();
-        
-        const result = await downloadYouTubeVideo(url, 'mp4', quality);
-        
-        if (result.success) {
-          const newPath = path.join(downloadsDir, `${fileId}.mp4`);
-          fs.renameSync(result.filePath, newPath);
-          
-          console.log(`✅ Real MP4 download complete: ${newPath} (${result.sizeMB} MB)`);
-        }
-      } catch (error) {
-        console.error('❌ MP4 download failed:', error.message);
-      }
-    }, 100);
-    
-  } catch (error) {
-    res.status(500).json({
-      status: 500,
-      success: false,
-      creator: "Bera",
-      error: error.message
-    });
-  }
 });
 
-// File download endpoint
-app.get('/api/download/file/:fileId', async (req, res) => {
-  try {
-    const { fileId } = req.params;
+app.post('/api/create-project', async (req, res) => {
+    const { sessionId, requirements } = req.body;
+    const session = getUserSession(sessionId);
     
-    console.log(`File download request: ${fileId}`);
+    if (!session.domainPattern) {
+        return res.status(400).json({
+            success: false,
+            message: 'Please set a domain pattern first.'
+        });
+    }
     
-    // Look for file with any extension
-    const files = fs.readdirSync(downloadsDir);
-    const file = files.find(f => f.startsWith(fileId));
-    
-    if (!file) {
-      // Check if download is still in progress
-      const statusFile = path.join(downloadsDir, `${fileId}.json`);
-      if (fs.existsSync(statusFile)) {
-        const status = JSON.parse(fs.readFileSync(statusFile, 'utf8'));
+    try {
+        const project = await processBERAProject(requirements, session);
         
-        if (status.status === 'processing') {
-          return res.status(202).json({
-            status: 202,
+        res.json({
             success: true,
-            creator: "Bera",
-            message: "File is still downloading. Please wait...",
-            retry_after: 30
-          });
-        } else if (status.status === 'ready' && fs.existsSync(status.filePath)) {
-          // File is ready, serve it
-          const filePath = status.filePath;
-          const stats = fs.statSync(filePath);
-          
-          let contentType = 'application/octet-stream';
-          if (filePath.endsWith('.mp3')) contentType = 'audio/mpeg';
-          if (filePath.endsWith('.mp4')) contentType = 'video/mp4';
-          
-          res.setHeader('Content-Type', contentType);
-          res.setHeader('Content-Disposition', `attachment; filename="${path.basename(filePath)}"`);
-          res.setHeader('Content-Length', stats.size);
-          
-          const stream = fs.createReadStream(filePath);
-          stream.pipe(res);
-          
-          // Clean up after download
-          stream.on('end', () => {
-            setTimeout(() => {
-              try {
-                fs.unlinkSync(filePath);
-                if (fs.existsSync(statusFile)) {
-                  fs.unlinkSync(statusFile);
-                }
-              } catch (e) {}
-            }, 5 * 60 * 1000);
-          });
-          
-          return;
-        }
-      }
-      
-      return res.status(404).json({
-        status: 404,
-        success: false,
-        creator: "Bera",
-        error: 'File not found. Please initiate download first.'
-      });
+            message: '🚀 Project completed successfully!',
+            project: project,
+            nextId: session.projectCounter.toString().padStart(3, '0'),
+            nextURL: generateNextURL(session)
+        });
+    } catch (error) {
+        console.error('Project creation error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Project creation failed: ' + error.message
+        });
     }
-    
-    const filePath = path.join(downloadsDir, file);
-    const stats = fs.statSync(filePath);
-    
-    console.log(`Serving file: ${file} (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
-    
-    let contentType = 'application/octet-stream';
-    if (file.endsWith('.mp3')) contentType = 'audio/mpeg';
-    if (file.endsWith('.mp4')) contentType = 'video/mp4';
-    
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', `attachment; filename="${file}"`);
-    res.setHeader('Content-Length', stats.size);
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Cache-Control', 'no-cache');
-    
-    const stream = fs.createReadStream(filePath);
-    stream.pipe(res);
-    
-    // Clean up after 10 minutes
-    setTimeout(() => {
-      try {
-        fs.unlinkSync(filePath);
-      } catch (e) {}
-    }, 10 * 60 * 1000);
-    
-  } catch (error) {
-    console.error('Download error:', error);
-    res.status(500).json({
-      status: 500,
-      success: false,
-      creator: "Bera",
-      error: error.message
-    });
-  }
 });
 
-// Audio streaming endpoint
-app.get('/api/stream/:fileId', (req, res) => {
-  try {
-    const { fileId } = req.params;
-    const files = fs.readdirSync(downloadsDir);
-    const file = files.find(f => f.startsWith(fileId) && f.endsWith('.mp3'));
+app.get('/api/session-info/:sessionId', (req, res) => {
+    const session = getUserSession(req.params.sessionId);
     
-    if (!file) {
-      return res.status(404).json({
-        status: 404,
-        success: false,
-        creator: "Bera",
-        error: 'File not found'
-      });
-    }
-    
-    const filePath = path.join(downloadsDir, file);
-    const stats = fs.statSync(filePath);
-    
-    console.log(`Streaming MP3: ${file} (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
-    
-    const range = req.headers.range;
-    
-    if (range) {
-      const parts = range.replace(/bytes=/, "").split("-");
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : stats.size - 1;
-      const chunksize = (end - start) + 1;
-      
-      res.writeHead(206, {
-        'Content-Range': `bytes ${start}-${end}/${stats.size}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': chunksize,
-        'Content-Type': 'audio/mpeg',
-        'Cache-Control': 'no-cache'
-      });
-      
-      const stream = fs.createReadStream(filePath, { start, end });
-      stream.pipe(res);
-    } else {
-      res.writeHead(200, {
-        'Content-Length': stats.size,
-        'Content-Type': 'audio/mpeg',
-        'Accept-Ranges': 'bytes',
-        'Cache-Control': 'no-cache'
-      });
-      
-      fs.createReadStream(filePath).pipe(res);
-    }
-    
-  } catch (error) {
-    res.status(500).json({
-      status: 500,
-      success: false,
-      creator: "Bera",
-      error: error.message
+    res.json({
+        domainPattern: session.domainPattern,
+        projectCounter: session.projectCounter,
+        nextId: session.projectCounter.toString().padStart(3, '0'),
+        nextURL: generateNextURL(session),
+        deployedCount: session.deployedProjects.length,
+        deployedProjects: session.deployedProjects.map(p => ({
+            id: p.id,
+            name: p.name,
+            url: p.deploymentURL,
+            date: p.createdAt
+        }))
     });
-  }
 });
 
-// Video streaming endpoint
-app.get('/api/stream/video/:fileId', (req, res) => {
-  try {
-    const { fileId } = req.params;
-    const files = fs.readdirSync(downloadsDir);
-    const file = files.find(f => f.startsWith(fileId) && f.endsWith('.mp4'));
+app.post('/api/reset-counter', (req, res) => {
+    const { sessionId, newCounter } = req.body;
+    const session = getUserSession(sessionId);
     
-    if (!file) {
-      return res.status(404).json({
-        status: 404,
-        success: false,
-        creator: "Bera",
-        error: 'File not found'
-      });
+    const counter = parseInt(newCounter);
+    if (isNaN(counter) || counter < 1) {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid counter value'
+        });
     }
     
-    const filePath = path.join(downloadsDir, file);
-    const stats = fs.statSync(filePath);
+    session.projectCounter = counter;
     
-    console.log(`Streaming MP4: ${file} (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
-    
-    const range = req.headers.range;
-    
-    if (range) {
-      const parts = range.replace(/bytes=/, "").split("-");
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : stats.size - 1;
-      const chunksize = (end - start) + 1;
-      
-      res.writeHead(206, {
-        'Content-Range': `bytes ${start}-${end}/${stats.size}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': chunksize,
-        'Content-Type': 'video/mp4',
-        'Cache-Control': 'no-cache'
-      });
-      
-      const stream = fs.createReadStream(filePath, { start, end });
-      stream.pipe(res);
-    } else {
-      res.writeHead(200, {
-        'Content-Length': stats.size,
-        'Content-Type': 'video/mp4',
-        'Accept-Ranges': 'bytes',
-        'Cache-Control': 'no-cache'
-      });
-      
-      fs.createReadStream(filePath).pipe(res);
-    }
-    
-  } catch (error) {
-    res.status(500).json({
-      status: 500,
-      success: false,
-      creator: "Bera",
-      error: error.message
-    });
-  }
-});
-
-// Check download status
-app.get('/api/status/:fileId', (req, res) => {
-  try {
-    const { fileId } = req.params;
-    const files = fs.readdirSync(downloadsDir);
-    const file = files.find(f => f.startsWith(fileId));
-    
-    const statusFile = path.join(downloadsDir, `${fileId}.json`);
-    
-    if (file) {
-      const filePath = path.join(downloadsDir, file);
-      const stats = fs.statSync(filePath);
-      
-      res.json({
-        status: 200,
+    res.json({
         success: true,
-        creator: "Bera",
-        result: {
-          fileId,
-          filename: file,
-          size: stats.size,
-          sizeMB: (stats.size / 1024 / 1024).toFixed(2),
-          ready: true,
-          download_url: `${req.protocol}://${req.get('host')}/api/download/file/${fileId}`,
-          stream_url: file.endsWith('.mp3') 
-            ? `${req.protocol}://${req.get('host')}/api/stream/${fileId}`
-            : `${req.protocol}://${req.get('host')}/api/stream/video/${fileId}`
-        }
-      });
-    } else if (fs.existsSync(statusFile)) {
-      const status = JSON.parse(fs.readFileSync(statusFile, 'utf8'));
-      
-      res.json({
-        status: 200,
-        success: true,
-        creator: "Bera",
-        result: {
-          fileId,
-          status: status.status,
-          progress: "downloading",
-          estimated_time: "30-60 seconds",
-          check_again: `${req.protocol}://${req.get('host')}/api/status/${fileId}`
-        }
-      });
-    } else {
-      res.status(404).json({
-        status: 404,
-        success: false,
-        creator: "Bera",
-        error: 'Download not found'
-      });
-    }
-  } catch (error) {
-    res.status(500).json({
-      status: 500,
-      success: false,
-      creator: "Bera",
-      error: error.message
+        message: `🔢 Counter reset to ${counter.toString().padStart(3, '0')}`,
+        nextId: session.projectCounter.toString().padStart(3, '0'),
+        nextURL: generateNextURL(session)
     });
-  }
 });
 
-// Health check
-app.get('/health', async (req, res) => {
-  const downloadsCount = fs.readdirSync(downloadsDir).length;
-  const ytDlpAvailable = await checkYtDlp();
-  
-  res.json({
-    status: 200,
-    success: true,
-    creator: "Bera",
-    message: "Real YouTube Downloader API is running",
-    timestamp: new Date().toISOString(),
-    stats: {
-      port: PORT,
-      downloads_count: downloadsCount,
-      yt_dlp_available: ytDlpAvailable,
-      uptime: Math.round(process.uptime()) + ' seconds',
-      memory_usage: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + ' MB'
-    },
-    features: {
-      real_downloads: "Downloads actual YouTube content",
-      multiple_formats: "MP3 and MP4 formats",
-      quality_options: "Multiple quality settings",
-      streaming: "Supports HTTP streaming",
-      range_requests: "Supports resume downloads"
-    }
-  });
-});
-
-// Simple dashboard
-app.get('/', (req, res) => {
-  const baseUrl = `${req.protocol}://${req.get('host')}`;
-  
-  const html = `
-  <!DOCTYPE html>
-  <html>
-  <head>
-    <title>Real YouTube Downloader</title>
-    <style>
-      body { font-family: Arial, sans-serif; padding: 20px; }
-      .container { max-width: 800px; margin: 0 auto; }
-      h1 { color: #333; }
-      .btn { background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin: 10px; }
-      code { background: #f4f4f4; padding: 5px; border-radius: 3px; }
-    </style>
-  </head>
-  <body>
-    <div class="container">
-      <h1>🎵 Real YouTube Downloader</h1>
-      <p>Downloads actual YouTube videos and audio</p>
-      
-      <h3>API Endpoints:</h3>
-      <ul>
-        <li><code>GET /api/download/youtube-mp3?apikey=bera&url=YOUTUBE_URL&quality=192</code></li>
-        <li><code>GET /api/download/youtube-mp4?apikey=bera&url=YOUTUBE_URL&quality=720p</code></li>
-        <li><code>GET /api/status/{fileId}</code> - Check download status</li>
-        <li><code>GET /health</code> - Health check</li>
-      </ul>
-      
-      <h3>Test Downloads:</h3>
-      <a class="btn" href="${baseUrl}/api/download/youtube-mp3?apikey=bera&url=https://youtu.be/dQw4w9WgXcQ&quality=192">
-        Test MP3 Download
-      </a>
-      <a class="btn" href="${baseUrl}/api/download/youtube-mp4?apikey=bera&url=https://youtu.be/dQw4w9WgXcQ&quality=720p">
-        Test MP4 Download
-      </a>
-    </div>
-  </body>
-  </html>
-  `;
-  
-  res.send(html);
-});
-
-// Install dependencies on startup
-async function initialize() {
-  console.log('Initializing YouTube Downloader...');
-  
-  try {
-    const ytDlpAvailable = await checkYtDlp();
-    if (!ytDlpAvailable) {
-      console.log('Installing dependencies...');
-      await installDependencies();
-    }
+app.post('/api/generate-image', async (req, res) => {
+    const { prompt } = req.body;
     
-    console.log('✅ System initialized and ready');
-  } catch (error) {
-    console.error('Initialization error:', error);
-  }
-}
+    try {
+        const imageURL = await generateImageWithGrok(prompt);
+        
+        res.json({
+            success: true,
+            imageURL: imageURL
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: 'Image generation failed: ' + error.message
+        });
+    }
+});
+
+// Developer attribution endpoint
+app.get('/api/developer', (req, res) => {
+    res.json({
+        developer: "Bruce Bera",
+        system: "BERA AI (Build-Execute-Review-Automate Artificial Intelligence)",
+        version: "4.0.0",
+        mission: "Dynamic Domain AI Development System",
+        contact: "bruce.bera@bera-ai.dev",
+        organization: "Bera AI Development Labs",
+        philosophy: "Flexible AI for flexible developers"
+    });
+});
 
 // Start server
-app.listen(PORT, '0.0.0.0', async () => {
-  console.log(`
-╔══════════════════════════════════════════════════════════════════╗
-║                    🚀 REAL YOUTUBE DOWNLOADER                    ║
-║                 Downloads Actual YouTube Content                 ║
-╚══════════════════════════════════════════════════════════════════╝
-
-📡 Server running on port ${PORT}
-🌐 Dashboard: http://localhost:${PORT}
-📊 Health: http://localhost:${PORT}/health
-
-🎵 REAL MP3 DOWNLOADS:
-   URL: http://localhost:${PORT}/api/download/youtube-mp3?apikey=bera&url=YOUTUBE_URL&quality=192
-   Features: Actual YouTube audio, 2-10MB files, playable MP3
-
-🎬 REAL MP4 DOWNLOADS:
-   URL: http://localhost:${PORT}/api/download/youtube-mp4?apikey=bera&url=YOUTUBE_URL&quality=720p
-   Features: Actual YouTube video, 5-50MB files, playable MP4
-
-🔑 API Key: bera
-
-⚡ Initializing system...
-`);
-
-  await initialize();
+app.listen(PORT, () => {
+    console.log(`
+    ┌─────────────────────────────────────┐
+    │                                     │
+    │   🚀 BERA AI SYSTEM STARTED         │
+    │                                     │
+    │   🔗 http://localhost:${PORT}       │
+    │   👨‍💻 Developer: Bruce Bera         │
+    │   🎯 Version: 4.0.0                 │
+    │                                     │
+    └─────────────────────────────────────┘
+    `);
 });
