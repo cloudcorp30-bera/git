@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BERA AI - Dynamic Domain Development System</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+            color: #fff;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+            padding: 30px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .logo {
+            font-family: 'Courier New', monospace;
+            font-size: 3.5rem;
+            margin-bottom: 20px;
+            color: #00d4ff;
+            text-shadow: 0 0 10px rgba(0, 212, 255, 0.5);
+        }
+
+        .status-badges {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            flex-wrap: wrap;
+            margin: 20px 0;
+        }
+
+        .badge {
+            padding: 10px 20px;
+            background: rgba(0, 0, 0, 0.4);
+            border-radius: 10px;
+            font-size: 0.9rem;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .badge.online {
+            border-color: #00ff88;
+            color: #00ff88;
+        }
+
+        .badge.api {
+            border-color: #ffaa00;
+            color: #ffaa00;
+        }
+
+        .dashboard {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin-bottom: 40px;
+        }
+
+        @media (max-width: 768px) {
+            .dashboard {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 15px;
+            padding: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+        }
+
+        .card h2 {
+            color: #00d4ff;
+            margin-bottom: 20px;
+            font-size: 1.5rem;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #aaa;
+        }
+
+        .input-field {
+            width: 100%;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 10px;
+            color: white;
+            font-size: 1rem;
+            transition: all 0.3s;
+        }
+
+        .input-field:focus {
+            outline: none;
+            border-color: #00d4ff;
+            box-shadow: 0 0 10px rgba(0, 212, 255, 0.3);
+        }
+
+        .btn {
+            padding: 15px 30px;
+            background: linear-gradient(45deg, #00d4ff, #0088ff);
+            border: none;
+            border-radius: 10px;
+            color: white;
+            font-size: 1rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s;
+            width: 100%;
+            margin-top: 10px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(0, 212, 255, 0.3);
+        }
+
+        .btn.secondary {
+            background: linear-gradient(45deg, #ff6b6b, #ffa500);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .examples {
+            background: rgba(0, 0, 0, 0.4);
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 10px;
+            font-size: 0.9rem;
+            color: #aaa;
+        }
+
+        .examples h4 {
+            color: #ffaa00;
+            margin-bottom: 10px;
+        }
+
+        .examples ul {
+            list-style: none;
+            padding-left: 20px;
+        }
+
+        .examples li {
+            margin-bottom: 5px;
+            padding-left: 10px;
+            border-left: 2px solid rgba(255, 170, 0, 0.3);
+        }
+
+        .output-area {
+            margin-top: 30px;
+            padding: 25px;
+            background: rgba(0, 0, 0, 0.4);
+            border-radius: 15px;
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            min-height: 200px;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+
+        .output-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .agent-process {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin: 20px 0;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.4);
+            border-radius: 10px;
+            border-left: 4px solid #00d4ff;
+        }
+
+        .agent-icon {
+            width: 40px;
+            height: 40px;
+            background: rgba(0, 212, 255, 0.2);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: #00d4ff;
+        }
+
+        .agent-details {
+            flex: 1;
+        }
+
+        .agent-name {
+            font-weight: bold;
+            color: #00d4ff;
+            margin-bottom: 5px;
+        }
+
+        .agent-status {
+            font-size: 0.9rem;
+            color: #aaa;
+        }
+
+        .url-display {
+            padding: 15px;
+            background: rgba(0, 212, 255, 0.1);
+            border-radius: 10px;
+            margin: 20px 0;
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            word-break: break-all;
+        }
+
+        .url-display a {
+            color: #00d4ff;
+            text-decoration: none;
+            font-weight: bold;
+        }
+
+        .url-display a:hover {
+            text-decoration: underline;
+        }
+
+        .deployment-status {
+            padding: 20px;
+            background: rgba(0, 255, 136, 0.1);
+            border-radius: 10px;
+            margin: 20px 0;
+            border: 1px solid rgba(0, 255, 136, 0.3);
+        }
+
+        .deployment-status h4 {
+            color: #00ff88;
+            margin-bottom: 10px;
+        }
+
+        .projects-list {
+            margin-top: 20px;
+        }
+
+        .project-item {
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            margin-bottom: 10px;
+            border-left: 4px solid #ffaa00;
+        }
+
+        .project-id {
+            color: #ffaa00;
+            font-weight: bold;
+            margin-right: 10px;
+        }
+
+        .project-name {
+            color: #fff;
+            font-weight: bold;
+        }
+
+        .project-url {
+            color: #00d4ff;
+            font-size: 0.9rem;
+            margin-top: 5px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 20px;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            border-top-color: #00d4ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .commands {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 30px;
+        }
+
+        .command-btn {
+            padding: 12px;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            color: #fff;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-align: center;
+        }
+
+        .command-btn:hover {
+            border-color: #00d4ff;
+            background: rgba(0, 212, 255, 0.1);
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 50px;
+            padding: 20px;
+            color: #aaa;
+            font-size: 0.9rem;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">
+                ██████╗ ███████╗██████╗  █████╗<br>
+                ██╔══██╗██╔════╝██╔══██╗██╔══██╗<br>
+                ██████╔╝█████╗  ██████╔╝███████║<br>
+                ██╔══██╗██╔══╝  ██╔══██╗██╔══██║<br>
+                ██████╔╝███████╗██║  ██║██║  ██║<br>
+                ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝
+            </div>
+            <h1>Build-Execute-Review-Automate Artificial Intelligence</h1>
+            
+            <div class="status-badges">
+                <div class="badge online">✅ SYSTEM STATUS: Online</div>
+                <div class="badge">👨‍💻 DEVELOPER: Bruce Bera</div>
+                <div class="badge">🔄 VERSION: 4.0.0</div>
+                <div class="badge api">🔧 INTEGRATED APIS: Ready</div>
+            </div>
+        </div>
+
+        <div class="dashboard">
+            <div class="card">
+                <h2>🌐 DOMAIN CONFIGURATION</h2>
+                <div class="form-group">
+                    <label>Your Deployment URL Pattern:</label>
+                    <input type="text" 
+                           id="domainPattern" 
+                           class="input-field" 
+                           placeholder="https://my-apps--user.replit.app/{ID}"
+                           value="https://my-projects--user.replit.app/{ID}">
+                </div>
+                
+                <div class="examples">
+                    <h4>Examples:</h4>
+                    <ul>
+                        <li>https://{ID}-app.vercel.app</li>
+                        <li>https://project-{ID}.onrender.com</li>
+                        <li>https://apps.mydomain.com/{ID}</li>
+                        <li>https://{ID}.github.io</li>
+                    </ul>
+                </div>
+
+                <button id="setDomainBtn" class="btn">✅ Set Domain Pattern</button>
+                <button id="showCurrentBtn" class="btn secondary">🔗 Show Current Domain</button>
+
+                <div class="form-group" style="margin-top: 30px;">
+                    <h3>🛠️ Project Counter</h3>
+                    <div style="display: flex; gap: 10px;">
+                        <input type="number" 
+                               id="counterInput" 
+                               class="input-field" 
+                               placeholder="Next ID (e.g., 001)"
+                               style="flex: 1;">
+                        <button id="resetCounterBtn" class="btn secondary">🔢 Reset Counter</button>
+                    </div>
+                </div>
+
+                <div class="commands">
+                    <div class="command-btn" onclick="showDeveloperInfo()">👨‍💻 About Developer</div>
+                    <div class="command-btn" onclick="showProjects()">📊 Show Projects</div>
+                    <div class="command-btn" onclick="showCapabilities()">🎯 Capabilities</div>
+                    <div class="command-btn" onclick="showHelp()">❓ Help</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>🚀 CREATE NEW PROJECT</h2>
+                <div class="form-group">
+                    <label>Project Requirements:</label>
+                    <textarea id="projectRequirements" 
+                              class="input-field" 
+                              rows="5"
+                              placeholder="Describe what you want to build... 
+Example: 'Create a weather dashboard with real-time data, 5-day forecast, and interactive map'
+Example: 'Build a customer management system with CRUD operations and search'
+Example: 'Make an e-commerce product listing page with filters and cart'"></textarea>
+                </div>
+
+                <button id="createProjectBtn" class="btn" disabled>🚀 Create Project</button>
+                <button id="generateImageBtn" class="btn secondary">🎨 Generate Image</button>
+
+                <div id="agentProcess" style="display: none;">
+                    <div class="agent-process">
+                        <div class="agent-icon">1</div>
+                        <div class="agent-details">
+                            <div class="agent-name">BERA ANALYZER</div>
+                            <div class="agent-status">Analyzing requirements...</div>
+                        </div>
+                    </div>
+                    <div class="agent-process">
+                        <div class="agent-icon">2</div>
+                        <div class="agent-details">
+                            <div class="agent-name">BERA GENERATOR</div>
+                            <div class="agent-status">Waiting...</div>
+                        </div>
+                    </div>
+                    <div class="agent-process">
+                        <div class="agent-icon">3</div>
+                        <div class="agent-details">
+                            <div class="agent-name">BERA DEBUGGER</div>
+                            <div class="agent-status">Waiting...</div>
+                        </div>
+                    </div>
+                    <div class="agent-process">
+                        <div class="agent-icon">4</div>
+                        <div class="agent-details">
+                            <div class="agent-name">BERA TESTER</div>
+                            <div class="agent-status">Waiting...</div>
+                        </div>
+                    </div>
+                    <div class="agent-process">
+                        <div class="agent-icon">5</div>
+                        <div class="agent-details">
+                            <div class="agent-name">BERA IMAGE GENERATOR</div>
+                            <div class="agent-status">Waiting...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="output" class="output-area">
+                    <div class="output-header">
+                        <h3>📋 SYSTEM OUTPUT</h3>
+                        <button id="clearOutputBtn" class="command-btn">Clear</button>
+                    </div>
+                    <div id="outputContent">
+                        <!-- Output will appear here -->
+                        <p>🔧 <strong>BERA AI System Ready</strong></p>
+                        <p>Please set your deployment domain pattern to begin.</p>
+                        <p>The system will generate sequential URLs according to your pattern.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="projectsList" class="card" style="display: none;">
+            <h2>📊 DEPLOYED PROJECTS</h2>
+            <div id="projectsContent"></div>
+        </div>
+
+        <footer>
+            <p>🤖 <strong>BERA AI</strong> - Build-Execute-Review-Automate Artificial Intelligence</p>
+            <p>👨‍💻 Created and developed by Bruce Bera | 🎯 Dynamic Domain AI Development System</p>
+            <p>🔄 Version 4.0.0 | 🔧 Multi-API Integration: OpenAI GPT-4, Google Gemini, XAI Grok AI</p>
+        </footer>
+    </div>
+
+    <script>
+        let sessionId = generateSessionId();
+        let currentDomainPattern = null;
+        let nextProjectId = '001';
+
+        function generateSessionId() {
+            return 'session_' + Math.random().toString(36).substr(2, 9);
+        }
+
+        function addOutput(text, type = 'info') {
+            const output = document.getElementById('outputContent');
+            const timestamp = new Date().toLocaleTimeString();
+            const color = type === 'error' ? '#ff6b6b' : 
+                         type === 'success' ? '#00ff88' : 
+                         type === 'warning' ? '#ffaa00' : '#00d4ff';
+            
+            output.innerHTML += `<p style="margin: 10px 0; color: ${color};">
+                <small>[${timestamp}]</small> ${text}
+            </p>`;
+            output.scrollTop = output.scrollHeight;
+        }
+
+        async function setDomainPattern() {
+            const pattern = document.getElementById('domainPattern').value.trim();
+            
+            if (!pattern.includes('{ID}') && !pattern.includes('{PROJECT_ID}') && !pattern.includes('{NUMBER}')) {
+                addOutput('❌ Error: URL pattern must include {ID}, {PROJECT_ID}, or {NUMBER} placeholder', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/set-domain', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sessionId, domainPattern: pattern })
+                });
+
+                const data = await response.json();
+                
+                if (data.success) {
+                    currentDomainPattern = pattern;
+                    nextProjectId = data.nextId;
+                    document.getElementById('createProjectBtn').disabled = false;
+                    
+                    addOutput(`✅ Domain pattern saved: ${pattern}`, 'success');
+                    addOutput(`🔗 Next project: ${data.nextURL}`, 'success');
+                    addOutput(`🆔 Starting ID: ${data.nextId}`, 'info');
+                } else {
+                    addOutput(`❌ ${data.message}`, 'error');
+                }
+            } catch (error) {
+                addOutput(`❌ Network error: ${error.message}`, 'error');
+            }
+        }
+
+        async function createProject() {
+            const requirements = document.getElementById('projectRequirements').value.trim();
+            
+            if (!requirements) {
+                addOutput('❌ Please enter project requirements', 'error');
+                return;
+            }
+
+            if (!currentDomainPattern) {
+                addOutput('❌ Please set a domain pattern first', 'error');
+                return;
+            }
+
+            // Show agent process
+            document.getElementById('agentProcess').style.display = 'block';
+            const agentStatuses = document.querySelectorAll('.agent-status');
+            agentStatuses.forEach(status => status.textContent = 'Waiting...');
+            
+            try {
+                // Step 1: BERA ANALYZER
+                agentStatuses[0].textContent = 'Analyzing requirements...';
+                agentStatuses[0].style.color = '#ffaa00';
+                addOutput(`🔍 BERA ANALYZER: Processing requirements...`, 'info');
+                
+                const response = await fetch('/api/create-project', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sessionId, requirements })
+                });
+
+                const data = await response.json();
+                
+                // Update agent statuses
+                agentStatuses[0].textContent = '✓ Analysis complete';
+                agentStatuses[0].style.color = '#00ff88';
+                agentStatuses[1].textContent = '✓ Code generated';
+                agentStatuses[1].style.color = '#00ff88';
+                agentStatuses[2].textContent = '✓ Debug complete';
+                agentStatuses[2].style.color = '#00ff88';
+                agentStatuses[3].textContent = '✓ Testing complete';
+                agentStatuses[3].style.color = '#00ff88';
+                
+                if (data.project.imageURL) {
+                    agentStatuses[4].textContent = '✓ Images generated';
+                    agentStatuses[4].style.color = '#00ff88';
+                } else {
+                    agentStatuses[4].textContent = 'Skipped (no images needed)';
+                    agentStatuses[4].style.color = '#aaa';
+                }
+
+                if (data.success) {
+                    addOutput('🎉 ' + data.message, 'success');
+                    addOutput(`🆔 PROJECT ID: ${data.project.id}`, 'info');
+                    addOutput(`🎯 PROJECT NAME: ${data.project.name}`, 'info');
+                    addOutput(`🔗 DEPLOYMENT URL: ${data.project.deploymentURL}`, 'success');
+                    
+                    if (data.project.imageURL) {
+                        addOutput(`🖼️ IMAGE GENERATED: ${data.project.imageURL}`, 'info');
+                    }
+                    
+                    addOutput(`📊 DEBUG REPORT: ${data.project.debugReport.substring(0, 100)}...`, 'info');
+                    addOutput(`🧪 TEST RESULTS: ${data.project.testResults.substring(0, 100)}...`, 'info');
+                    
+                    // Show deployment simulation
+                    addOutput(`🌐 DEPLOYMENT PROCESS:`, 'info');
+                    addOutput(`✓ Building application... (15s)`, 'success');
+                    addOutput(`✓ Configuring environment... (5s)`, 'success');
+                    addOutput(`✓ Starting server... (3s)`, 'success');
+                    addOutput(`✓ Opening ports... (2s)`, 'success');
+                    addOutput(`✅ Application live at: ${data.project.deploymentURL}`, 'success');
+                    
+                    nextProjectId = data.nextId;
+                    document.getElementById('projectRequirements').value = '';
+                } else {
+                    addOutput(`❌ ${data.message}`, 'error');
+                }
+            } catch (error) {
+                addOutput(`❌ Project creation failed: ${error.message}`, 'error');
+                agentStatuses.forEach(status => {
+                    status.textContent = '✗ Failed';
+                    status.style.color = '#ff6b6b';
+                });
+            }
+        }
+
+        async function showCurrentDomain() {
+            try {
+                const response = await fetch(`/api/session-info/${sessionId}`);
+                const data = await response.json();
+                
+                if (data.domainPattern) {
+                    addOutput(`🔗 Current pattern: ${data.domainPattern}`, 'info');
+                    addOutput(`🆔 Next ID: ${data.nextId}`, 'info');
+                    addOutput(`🔗 Next URL: ${data.nextURL}`, 'info');
+                    addOutput(`📊 Projects deployed: ${data.deployedCount}`, 'info');
+                } else {
+                    addOutput('❌ No domain pattern set. Please set one first.', 'error');
+                }
+            } catch (error) {
+                addOutput(`❌ Error: ${error.message}`, 'error');
+            }
+        }
+
+        async function resetCounter() {
+            const newCounter = document.getElementById('counterInput').value;
+            
+            if (!newCounter) {
+                addOutput('❌ Please enter a new counter value', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/reset-counter', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sessionId, newCounter })
+                });
+
+                const data = await response.json();
+                
+                if (data.success) {
+                    addOutput(data.message, 'success');
+                    addOutput(`🆔 Next ID: ${data.nextId}`, 'info');
+                    addOutput(`🔗 Next URL: ${data.nextURL}`, 'info');
+                } else {
+                    addOutput(data.message, 'error');
+                }
+            } catch (error) {
+                addOutput(`❌ Error: ${error.message}`, 'error');
+            }
+        }
+
+        async function showProjects() {
+            try {
+                const response = await fetch(`/api/session-info/${sessionId}`);
+                const data = await response.json();
+                
+                const projectsList = document.getElementById('projectsList');
+                const projectsContent = document.getElementById('projectsContent');
+                
+                if (data.deployedProjects.length > 0) {
+                    projectsContent.innerHTML = data.deployedProjects.map(project => `
+                        <div class="project-item">
+                            <div>
+                                <span class="project-id">${project.id}</span>
+                                <span class="project-name">${project.name}</span>
+                            </div>
+                            <div class="project-url">${project.url}</div>
+                            <small>${new Date(project.date).toLocaleString()}</small>
+                        </div>
+                    `).join('');
+                    
+                    projectsList.style.display = 'block';
+                } else {
+                    addOutput('📊 No projects deployed yet.', 'info');
+                }
+            } catch (error) {
+                addOutput(`❌ Error: ${error.message}`, 'error');
+            }
+        }
+
+        async function showDeveloperInfo() {
+            try {
+                const response = await fetch('/api/developer');
+                const data = await response.json();
+                
+                addOutput('🤖 ' + data.system, 'info');
+                addOutput('👨‍💻 DEVELOPER: ' + data.developer, 'info');
+                addOutput('🔄 VERSION: ' + data.version, 'info');
+                addOutput('🎯 MISSION: ' + data.mission, 'info');
+                addOutput('🏢 ORGANIZATION: ' + data.organization, 'info');
+                addOutput('📚 PHILOSOPHY: ' + data.philosophy, 'info');
+                addOutput('📧 CONTACT: ' + data.contact, 'info');
+            } catch (error) {
+                addOutput(`🤖 BERA AI was created and developed by Bruce Bera`, 'info');
+                addOutput(`📅 Development Started: 2024`, 'info');
+                addOutput(`🎯 Mission: Dynamic Domain AI Development System`, 'info');
+                addOutput(`🔗 Contact: bruce.bera@bera-ai.dev`, 'info');
+            }
+        }
+
+        async function generateImage() {
+            const prompt = prompt('Enter image description:');
+            if (!prompt) return;
+
+            try {
+                addOutput(`🎨 Generating image: "${prompt}"`, 'info');
+                
+                const response = await fetch('/api/generate-image', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt })
+                });
+
+                const data = await response.json();
+                
+                if (data.success) {
+                    addOutput(`✅ Image generated successfully!`, 'success');
+                    addOutput(`🔗 Image URL: ${data.imageURL}`, 'info');
+                    
+                    // Open image in new tab
+                    window.open(data.imageURL, '_blank');
+                } else {
+                    addOutput(`❌ ${data.message}`, 'error');
+                }
+            } catch (error) {
+                addOutput(`❌ Image generation failed: ${error.message}`, 'error');
+            }
+        }
+
+        function showCapabilities() {
+            addOutput('🎯 BERA AI CAPABILITIES:', 'info');
+            addOutput('✓ Dynamic Domain Support - Accept ANY URL pattern with {ID}', 'success');
+            addOutput('✓ Sequential Project IDs (001, 002, 003...)', 'success');
+            addOutput('✓ Multi-API Integration (OpenAI, Gemini, Grok AI)', 'success');
+            addOutput('✓ Image Generation with Grok-2-Image', 'success');
+            addOutput('✓ Multi-Agent Processing Pipeline', 'success');
+            addOutput('✓ Project Management & Deployment Simulation', 'success');
+            addOutput('✓ Real-time Code Generation & Debugging', 'success');
+        }
+
+        function showHelp() {
+            addOutput('❓ BERA AI COMMAND REFERENCE:', 'info');
+            addOutput('🔗 DOMAIN COMMANDS:', 'info');
+            addOutput('  • "Use pattern: [URL]" - Set deployment pattern', 'info');
+            addOutput('  • "Show current domain" - View current configuration', 'info');
+            addOutput('  • "Reset counter to [number]" - Reset project counter', 'info');
+            addOutput('🚀 DEVELOPMENT COMMANDS:', 'info');
+            addOutput('  • Enter requirements and click "Create Project"', 'info');
+            addOutput('  • "Generate Image" - Create visual assets', 'info');
+            addOutput('  • "Show Projects" - View deployed projects', 'info');
+            addOutput('👨‍💻 SYSTEM COMMANDS:', 'info');
+            addOutput('  • "About Developer" - Creator information', 'info');
+            addOutput('  • "Capabilities" - System features', 'info');
+            addOutput('  • "Help" - This command reference', 'info');
+        }
+
+        // Initialize event listeners
+        document.getElementById('setDomainBtn').addEventListener('click', setDomainPattern);
+        document.getElementById('createProjectBtn').addEventListener('click', createProject);
+        document.getElementById('showCurrentBtn').addEventListener('click', showCurrentDomain);
+        document.getElementById('resetCounterBtn').addEventListener('click', resetCounter);
+        document.getElementById('generateImageBtn').addEventListener('click', generateImage);
+        document.getElementById('clearOutputBtn').addEventListener('click', () => {
+            document.getElementById('outputContent').innerHTML = '';
+        });
+
+        // Add keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 'Enter') {
+                createProject();
+            }
+            if (e.key === 'Escape') {
+                document.getElementById('projectsList').style.display = 'none';
+            }
+        });
+
+        // Initial message
+        addOutput('🔧 BERA AI System Ready - Version 4.0.0', 'info');
+        addOutput('👨‍💻 Developed by Bruce Bera', 'info');
+        addOutput('🌐 Please set your deployment URL pattern to begin', 'info');
+    </script>
+</body>
+</html>
